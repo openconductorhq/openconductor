@@ -6,6 +6,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -653,6 +654,7 @@ func TestTabHitTestSingleTab(t *testing.T) {
 func TestTabHitTestMultipleTabs(t *testing.T) {
 	cfg := configWith3Projects()
 	app := NewApp(cfg, "", nil)
+	app.width = 300 // wide enough that every tab fits
 	// Inject sessions and open tabs.
 	for _, p := range cfg.Projects {
 		s := &session.Session{ID: p.Name, Instance: 1, Project: p, State: session.StateRunning}
@@ -707,6 +709,7 @@ func TestTabHitTestNegativeX(t *testing.T) {
 func TestTabHitTestCloseRegion(t *testing.T) {
 	cfg := configWith3Projects()
 	app := NewApp(cfg, "", nil)
+	app.width = 300
 	// Inject sessions.
 	for _, p := range cfg.Projects[:2] {
 		s := &session.Session{ID: p.Name, Instance: 1, Project: p, State: session.StateRunning}
@@ -2644,5 +2647,59 @@ func TestAttentionResults_StaleResultsSendNoKeys(t *testing.T) {
 				t.Errorf("state = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTabHitTestOverflowMatchesDrawnTabs(t *testing.T) {
+	cfg := configWith3Projects()
+	app := NewApp(cfg, "", nil)
+	for _, p := range cfg.Projects {
+		app.mgr.InjectSession(p.Name, &session.Session{ID: p.Name, Instance: 1, Project: p, State: session.StateRunning})
+	}
+	app.addTab("beta")
+	app.addTab("gamma")
+	if err := app.mgr.SetActive("gamma"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Room for the last two tabs only: the drawn bar is [beta, gamma].
+	panel := lipgloss.Width(app.renderTab(1)) + lipgloss.Width(app.renderTab(2))
+	app.width = panel + app.sidebar.Width() + 2*screenPadding
+
+	if got := app.visibleTabIndices(); !slices.Equal(got, []int{1, 2}) {
+		t.Fatalf("visible = %v, want [1 2]", got)
+	}
+	if idx, _ := app.tabHitTest(0); idx != 1 {
+		t.Errorf("click at X=0 hit tab %d, want 1 (left-most drawn tab)", idx)
+	}
+	if !strings.Contains(app.tabBarView(), "beta") || strings.Contains(app.tabBarView(), "alpha") {
+		t.Error("tab bar should draw beta and gamma only")
+	}
+}
+
+func TestSyncTerminal_KeepsSelectionUntilSwitch(t *testing.T) {
+	cfg := configWith3Projects()
+	app := NewApp(cfg, "", nil)
+	for _, p := range cfg.Projects[:2] {
+		app.mgr.InjectSession(p.Name, &session.Session{ID: p.Name, Project: p, State: session.StateRunning,
+			VT: vt10x.New(vt10x.WithSize(80, 10)), Width: 80, Height: 10})
+	}
+	if err := app.mgr.SetActive("alpha"); err != nil {
+		t.Fatal(err)
+	}
+	app.syncTerminalFromSession()
+	app.terminal.hasSelection = true
+
+	app.syncTerminalFromSession() // more output from the same session
+	if !app.terminal.hasSelection {
+		t.Fatal("selection cleared by output from the active session")
+	}
+
+	if err := app.mgr.SetActive("beta"); err != nil {
+		t.Fatal(err)
+	}
+	app.syncTerminalFromSession()
+	if app.terminal.hasSelection {
+		t.Fatal("selection should clear on session switch")
 	}
 }

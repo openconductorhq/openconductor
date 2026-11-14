@@ -29,7 +29,7 @@ const (
 
 type terminalModel struct {
 	vt        vt10x.Terminal
-	mu        *sync.RWMutex
+	mu        *sync.RWMutex // guards vt; points at the displayed session's Mu
 	width     int
 	height    int
 	focused   bool

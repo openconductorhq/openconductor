@@ -98,7 +98,6 @@ type App struct {
 	sidebarWidth  int                     // content width of sidebar (excludes padding/border)
 	dragging      bool                    // true during separator drag
 	openTabs      []string                // session IDs of opened tabs, in visit order
-	visibleTabs   []int                   // indices into openTabs that are currently rendered (subset when overflow)
 	tabProjects   map[string]string       // session ID → project name (survives mgr.Close)
 	tabLabels     map[string]string       // custom display labels per session ID (empty = use session ID)
 	sessionStates map[string]SessionState // per-session state, keyed by session ID
@@ -1446,79 +1445,13 @@ func (a App) tabBarView() string {
 	sbWidth := a.sidebar.Width()
 	panelWidth := a.innerWidth() - sbWidth
 
-	activeSessionID := a.mgr.ActiveName()
-
-	// Render each tab as a bordered box. All tabs show a close button ✕.
-	renderedTabs := make([]string, len(a.openTabs))
-	for i := range a.openTabs {
-		renderedTabs[i] = a.renderTab(i)
+	// Show only the tabs that fit, always including the active one. This
+	// prevents overflow that breaks layout and mouse coordinates.
+	var shown []string
+	for _, i := range a.visibleTabIndices() {
+		shown = append(shown, a.renderTab(i))
 	}
-
-	// Join tabs side by side (aligned at top). If the total width
-	// exceeds the panel, show only tabs that fit — always including
-	// the active tab. This prevents overflow that breaks layout and
-	// mouse coordinate calculations on terminal resize.
-	var row string
-	a.visibleTabs = nil
-	if len(renderedTabs) > 0 {
-		totalWidth := 0
-		for _, t := range renderedTabs {
-			totalWidth += lipgloss.Width(t)
-		}
-
-		if totalWidth <= panelWidth {
-			// Everything fits — all tabs visible.
-			row = lipgloss.JoinHorizontal(lipgloss.Top, renderedTabs...)
-			for i := range renderedTabs {
-				a.visibleTabs = append(a.visibleTabs, i)
-			}
-		} else {
-			// Overflow — find the active tab index, then greedily
-			// include tabs around it until the panel is full.
-			activeIdx := 0
-			for i, sid := range a.openTabs {
-				if sid == activeSessionID {
-					activeIdx = i
-					break
-				}
-			}
-
-			visible := []int{activeIdx}
-			usedWidth := lipgloss.Width(renderedTabs[activeIdx])
-
-			// Expand outward from the active tab.
-			lo, hi := activeIdx-1, activeIdx+1
-			for lo >= 0 || hi < len(renderedTabs) {
-				if lo >= 0 {
-					w := lipgloss.Width(renderedTabs[lo])
-					if usedWidth+w <= panelWidth {
-						visible = append([]int{lo}, visible...)
-						usedWidth += w
-						lo--
-					} else {
-						lo = -1
-					}
-				}
-				if hi < len(renderedTabs) {
-					w := lipgloss.Width(renderedTabs[hi])
-					if usedWidth+w <= panelWidth {
-						visible = append(visible, hi)
-						usedWidth += w
-						hi++
-					} else {
-						hi = len(renderedTabs)
-					}
-				}
-			}
-
-			a.visibleTabs = visible
-			var shownTabs []string
-			for _, idx := range visible {
-				shownTabs = append(shownTabs, renderedTabs[idx])
-			}
-			row = lipgloss.JoinHorizontal(lipgloss.Top, shownTabs...)
-		}
-	}
+	row := lipgloss.JoinHorizontal(lipgloss.Top, shown...)
 
 	// Fill remaining width with ─ border (the gap).
 	rowWidth := lipgloss.Width(row)
@@ -1535,6 +1468,52 @@ func (a App) tabBarView() string {
 	// No tabs: pad gap to 3 lines for consistent layout.
 	blank := strings.Repeat(" ", panelWidth)
 	return blank + "\n" + gap
+}
+
+// visibleTabIndices returns the openTabs indices drawn in the tab bar, in
+// order. When all tabs don't fit, tabs are added outward from the active
+// tab until the panel is full. Shared by tabBarView and tabHitTest so clicks
+// map to what is drawn.
+func (a App) visibleTabIndices() []int {
+	if len(a.openTabs) == 0 {
+		return nil
+	}
+	panelWidth := a.innerWidth() - a.sidebar.Width()
+	widths := make([]int, len(a.openTabs))
+	total := 0
+	for i := range a.openTabs {
+		widths[i] = lipgloss.Width(a.renderTab(i))
+		total += widths[i]
+	}
+	if total <= panelWidth {
+		all := make([]int, len(a.openTabs))
+		for i := range all {
+			all[i] = i
+		}
+		return all
+	}
+
+	activeIdx := max(slices.Index(a.openTabs, a.mgr.ActiveName()), 0)
+	lo, hi := activeIdx, activeIdx+1 // visible = [lo, hi)
+	used := widths[activeIdx]
+	for grew := true; grew; {
+		grew = false
+		if lo > 0 && used+widths[lo-1] <= panelWidth {
+			lo--
+			used += widths[lo]
+			grew = true
+		}
+		if hi < len(widths) && used+widths[hi] <= panelWidth {
+			used += widths[hi]
+			hi++
+			grew = true
+		}
+	}
+	out := make([]int, 0, hi-lo)
+	for i := lo; i < hi; i++ {
+		out = append(out, i)
+	}
+	return out
 }
 
 func (a *App) layout() {
@@ -1688,12 +1667,26 @@ func (a *App) syncTerminalFromSession() {
 	alt := vt != nil && vt.Mode()&vt10x.ModeAltScreen != 0
 	s.Mu.RUnlock()
 
-	a.terminal.mu.Lock()
+	// The terminal reads the session's VT, so it must hold the lock the
+	// session's ReadLoop writes under. Its own fields are UI-thread only.
+	a.terminal.mu = &s.Mu
 
-	// Save the outgoing session's scroll state before overwriting.
-	if prev := a.terminal.sessionID; prev != "" && prev != s.ID {
-		a.scrollOffsets[prev] = a.terminal.scrollOffset
-		a.scrollPinned[prev] = a.terminal.scrollPinned
+	// This also runs on every output chunk of the active session, so
+	// selection and scroll state change only on an actual switch.
+	switched := a.terminal.sessionID != s.ID
+	if switched {
+		// Save the outgoing session's scroll state, restore the incoming one's.
+		if prev := a.terminal.sessionID; prev != "" {
+			a.scrollOffsets[prev] = a.terminal.scrollOffset
+			a.scrollPinned[prev] = a.terminal.scrollPinned
+		}
+		a.terminal.scrollOffset = a.scrollOffsets[s.ID]
+		a.terminal.scrollPinned = a.scrollPinned[s.ID]
+	}
+	if switched || a.terminal.vt != vt {
+		// A selection belongs to the screen it was made on.
+		a.terminal.selActive = false
+		a.terminal.hasSelection = false
 	}
 
 	a.terminal.vt = vt
@@ -1702,16 +1695,6 @@ func (a *App) syncTerminalFromSession() {
 	a.terminal.active = true
 	a.terminal.altScreen = alt
 	a.terminal.sessionID = s.ID
-
-	// Clear any in-app text selection from the previous session.
-	a.terminal.selActive = false
-	a.terminal.hasSelection = false
-
-	// Restore the incoming session's scroll state.
-	a.terminal.scrollOffset = a.scrollOffsets[s.ID]
-	a.terminal.scrollPinned = a.scrollPinned[s.ID]
-
-	a.terminal.mu.Unlock()
 
 	// Point the terminal at this session's scrollback buffer.
 	id := s.ID
@@ -1996,10 +1979,8 @@ func pushAltScreenDiff(sb *scrollbackBuffer, oldTexts []string, oldGlyphs []scro
 // clearTerminal deactivates the terminal widget so it shows the empty
 // placeholder. Called when all tabs are closed and there is nothing to display.
 func (a *App) clearTerminal() {
-	a.terminal.mu.Lock()
 	a.terminal.vt = nil
 	a.terminal.active = false
-	a.terminal.mu.Unlock()
 }
 
 // clampAndSetSidebarWidth sets the sidebar content width from a mouse X
@@ -2031,23 +2012,11 @@ func (a *App) resizeAllSessions() {
 // (tabIndex, isClose). tabIndex is -1 if the click falls outside any tab.
 // isClose is true if the click landed on the close button region (✕) of any tab.
 //
-// Only visible tabs (from visibleTabs) are considered, so clicks map correctly
-// even when the tab bar is truncated due to narrow terminal width.
+// Only visible tabs are considered, so clicks map correctly even when the
+// tab bar is truncated due to narrow terminal width.
 func (a App) tabHitTest(localX int) (int, bool) {
-	// Use visibleTabs if set, otherwise fall back to all openTabs.
-	indices := a.visibleTabs
-	if len(indices) == 0 {
-		indices = make([]int, len(a.openTabs))
-		for i := range a.openTabs {
-			indices[i] = i
-		}
-	}
-
 	offset := 0
-	for _, i := range indices {
-		if i < 0 || i >= len(a.openTabs) {
-			continue
-		}
+	for _, i := range a.visibleTabIndices() {
 		w := lipgloss.Width(a.renderTab(i))
 
 		if localX >= offset && localX < offset+w {
