@@ -196,7 +196,8 @@ func (m terminalModel) viewScrollbackMixed() string {
 		offset = sbLen
 	}
 
-	fromScrollback := offset
+	// Always one screen: scrollback rows from offset back, then live rows.
+	fromScrollback := min(offset, m.height)
 	fromViewport := m.height - fromScrollback
 
 	var sb strings.Builder
@@ -591,7 +592,8 @@ func (m terminalModel) plainTextScrollbackMixed() string {
 	if offset > sbLen {
 		offset = sbLen
 	}
-	fromScrollback := offset
+	// Always one screen: scrollback rows from offset back, then live rows.
+	fromScrollback := min(offset, m.height)
 	fromViewport := m.height - fromScrollback
 	lines := make([]string, 0, m.height)
 

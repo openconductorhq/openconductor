@@ -1058,3 +1058,36 @@ func newAltScreenSession(width, height int) *session.Session {
 		Project: config.Project{Agent: config.AgentOpenCode},
 	}
 }
+
+func TestViewScrollbackMixed_OffsetBeyondHeightRendersOneScreen(t *testing.T) {
+	tm := newTerminalModel()
+	tm.vt = vt10x.New(vt10x.WithSize(20, 5))
+	tm.width, tm.height, tm.active = 20, 5, true
+	for i := 0; i < 30; i++ {
+		tm.scrollback.PushForce(session.TextToGlyphs(fmt.Sprintf("L%02d", i)))
+	}
+	tm.scrollOffset = 12 // more than one screen up
+
+	lines := strings.Split(tm.viewScrollbackMixed(), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("rendered %d rows, want 5", len(lines))
+	}
+	for i, want := range []string{"L18", "L19", "L20", "L21", "L22"} {
+		if got := strings.TrimSpace(stripAnsi(lines[i])); got != want {
+			t.Errorf("row %d = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestPlainTextScrollbackMixed_OffsetBeyondHeight(t *testing.T) {
+	tm := newTerminalModel()
+	tm.vt = vt10x.New(vt10x.WithSize(20, 5))
+	tm.width, tm.height, tm.active = 20, 5, true
+	for i := 0; i < 30; i++ {
+		tm.scrollback.PushForce(session.TextToGlyphs(fmt.Sprintf("L%02d", i)))
+	}
+	tm.scrollOffset = 12
+	if got := tm.plainTextScrollbackMixed(); got != "L18\nL19\nL20\nL21\nL22" {
+		t.Errorf("plain text = %q", got)
+	}
+}
