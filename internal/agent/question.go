@@ -57,6 +57,11 @@ func ParseQuestionOptions(lines []string) []string {
 			options = append(options, stripped)
 			continue
 		}
+		// Divider inside the dialog (Claude Code puts one before
+		// "Chat about this").
+		if strings.Trim(stripped, "─━") == "" {
+			continue
+		}
 		// Description line for an option: indented deeper than the option
 		// prefix ("❯ 1." / "  2."), or inside an OpenCode dialog border.
 		indent := len(lines[i]) - len(strings.TrimLeft(lines[i], " "))

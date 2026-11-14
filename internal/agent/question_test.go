@@ -226,6 +226,24 @@ func TestParseQuestionOptions_DescriptionsAndMultiDigit(t *testing.T) {
 			"  3. Type something.",
 			footer,
 		}, 3},
+		{"claude code 2.1 dialog with divider (captured)", []string{
+			"────────────────────────────────────────",
+			"←  ☐ Colour  ☐ Pet  ✔ Submit  →",
+			"",
+			"What is your favourite colour?",
+			"",
+			"❯ 1. Red",
+			"     A bold, warm colour that signals energy and passion.",
+			"  2. Green",
+			"     A calm, natural colour associated with growth and balance.",
+			"  3. Blue",
+			"     A cool, steady colour linked to calm and clarity.",
+			"  4. Type something.",
+			"────────────────────────────────────────",
+			"  5. Chat about this",
+			"",
+			"Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+		}, 5},
 		{"ten or more options", func() []string {
 			l := []string{"Pick one:"}
 			for i := 1; i <= 12; i++ {
