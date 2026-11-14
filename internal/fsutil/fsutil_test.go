@@ -6,6 +6,7 @@ package fsutil
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -28,6 +29,8 @@ func TestExpandHome(t *testing.T) {
 }
 
 func TestAtomicWrite(t *testing.T) {
+	old := syscall.Umask(0o022)
+	defer syscall.Umask(old)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.json")
 
@@ -36,6 +39,13 @@ func TestAtomicWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFile(t, path, "one", 0o644)
+
+	// New files honor the umask.
+	if err := AtomicWrite(filepath.Join(dir, "g"), []byte("x"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, filepath.Join(dir, "g"), "x", 0o644)
+	os.Remove(filepath.Join(dir, "g"))
 
 	// Existing file keeps its mode even when a looser perm is passed.
 	if err := os.Chmod(path, 0o600); err != nil {
