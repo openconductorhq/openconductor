@@ -5,8 +5,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"reflect"
 	"strconv"
 	"strings"
@@ -14,7 +12,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/creack/pty"
 	"github.com/hinshun/vt10x"
 
 	"github.com/openconductorhq/openconductor/internal/logging"
@@ -30,15 +27,7 @@ const (
 	vtAttrBlink     = 1 << 5
 )
 
-// ptyOutputMsg carries raw bytes read from the PTY.
-type ptyOutputMsg []byte
-
-// ptyExitedMsg signals the PTY process has exited.
-type ptyExitedMsg struct{ err error }
-
 type terminalModel struct {
-	ptmx      *os.File
-	cmd       *exec.Cmd
 	vt        vt10x.Terminal
 	mu        *sync.RWMutex
 	width     int
@@ -85,53 +74,6 @@ func newTerminalModel() terminalModel {
 		active:     false,
 		scrollback: newScrollbackBuffer(defaultScrollbackCapacity),
 	}
-}
-
-func (m *terminalModel) readLoop() tea.Cmd {
-	return func() tea.Msg {
-		buf := make([]byte, 4096)
-		n, err := m.ptmx.Read(buf)
-		if err != nil {
-			return ptyExitedMsg{err: err}
-		}
-		data := make([]byte, n)
-		copy(data, buf[:n])
-		return ptyOutputMsg(data)
-	}
-}
-
-// Update handles terminal-level messages. In the OpenConductor app flow,
-// this method is NOT called — the App handles session I/O at a higher level
-// (sessionOutputMsg + timer-based runScrollCheck). This Update path exists
-// for standalone terminalModel use and is
-// exercised by scrollback_test.go.
-func (m terminalModel) Update(msg tea.Msg) (terminalModel, tea.Cmd) {
-	switch msg := msg.(type) {
-	case ptyOutputMsg:
-		if !m.active {
-			return m, nil
-		}
-		m.mu.Lock()
-		m.captureAndWrite(msg)
-		m.mu.Unlock()
-		return m, m.readLoop()
-
-	case ptyExitedMsg:
-		m.active = false
-		return m, nil
-
-	case tea.KeyMsg:
-		if !m.active || !m.focused {
-			return m, nil
-		}
-		data := keyToBytes(msg)
-		if data != nil && m.ptmx != nil {
-			m.ptmx.Write(data)
-		}
-		return m, nil
-	}
-
-	return m, nil
 }
 
 func (m terminalModel) View() string {
@@ -875,12 +817,6 @@ func (m *terminalModel) SetSize(width, height int) {
 	}
 	m.width = width
 	m.height = height
-	if m.active && m.ptmx != nil {
-		pty.Setsize(m.ptmx, &pty.Winsize{
-			Rows: uint16(height),
-			Cols: uint16(width),
-		})
-	}
 	m.mu.Lock()
 	if m.vt != nil {
 		m.vt.Resize(width, height)
@@ -901,15 +837,6 @@ func (m *terminalModel) GetScreenLines() []string {
 		lines[row] = session.RowText(m.vt, row, m.width)
 	}
 	return lines
-}
-
-func (m *terminalModel) Close() {
-	if m.ptmx != nil {
-		m.ptmx.Close()
-	}
-	if m.cmd != nil && m.cmd.Process != nil {
-		m.cmd.Process.Signal(os.Interrupt)
-	}
 }
 
 func keyToBytes(msg tea.KeyMsg) []byte {

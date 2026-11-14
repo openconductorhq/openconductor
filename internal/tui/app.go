@@ -465,7 +465,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !a.lastCtrlC.IsZero() && now.Sub(a.lastCtrlC) < ctrlCWindow {
 				a.saveState()
 				a.mgr.Close()
-				a.terminal.Close()
 				return a, tea.Quit
 			}
 			a.lastCtrlC = now
