@@ -323,7 +323,6 @@ func (s *Session) ReadLoop() <-chan []byte {
 // Must be called with s.Mu held (write lock).
 func (s *Session) captureScrollOff(data []byte) {
 	vt := s.VT
-	cursor := vt.Cursor()
 	h := s.Height
 
 	// For alt-screen apps (like OpenCode), skip the capture — their TUI
@@ -333,7 +332,6 @@ func (s *Session) captureScrollOff(data []byte) {
 		vt.Write(data)
 		return
 	}
-	_ = cursor
 
 	// Snapshot the top rows before write. We save up to height rows because
 	// a large write can scroll the entire screen.
@@ -352,46 +350,11 @@ func (s *Session) captureScrollOff(data []byte) {
 	// Perform the actual write.
 	vt.Write(data)
 
-	// Detect how many rows scrolled off by finding where old content
-	// ended up in the new screen. Check multiple old rows against the
-	// new screen to find the shift.
-	newRow0 := RowText(vt, 0, w)
-
-	scrolled := 0
-	for shift := 1; shift < h; shift++ {
-		// Check if old[shift] == new[0]: the old row at position 'shift'
-		// is now at position 0, meaning 'shift' rows scrolled off.
-		if preTexts[shift] == "" {
-			continue
-		}
-		if preTexts[shift] == newRow0 {
-			scrolled = shift
-			break
-		}
+	newTexts := make([]string, h)
+	for row := 0; row < h; row++ {
+		newTexts[row] = RowText(vt, row, w)
 	}
-
-	// Fallback: if we couldn't find a matching row (entire screen changed),
-	// check how many old rows are NOT in the new screen at all. This handles
-	// bursts larger than the screen height where no old content survives.
-	if scrolled == 0 {
-		newTexts := make(map[string]struct{}, h)
-		for row := 0; row < h; row++ {
-			if t := RowText(vt, row, w); t != "" {
-				newTexts[t] = struct{}{}
-			}
-		}
-		// Count old non-blank rows that are completely gone from the new screen.
-		for i := 0; i < h; i++ {
-			if preTexts[i] == "" {
-				continue
-			}
-			if _, exists := newTexts[preTexts[i]]; !exists {
-				scrolled++
-			} else {
-				break // Found a surviving row — stop counting.
-			}
-		}
-	}
+	scrolled := scrollShift(preTexts, newTexts)
 
 	// Push scrolled-off rows to the capture buffer. Blank lines are
 	// preserved — they serve as meaningful separators in CLI agent output
@@ -404,6 +367,49 @@ func (s *Session) captureScrollOff(data []byte) {
 			})
 		}
 	}
+}
+
+// scrollShift returns how many rows scrolled off the top between the pre
+// and post screens. It picks the shift (0 = no scroll) under which the most
+// non-blank old rows line up with the new screen, so a row that merely
+// repeats lower down (a table separator) isn't mistaken for a scroll; ties
+// go to the smaller shift. If no shift lines anything up (a burst larger
+// than the screen), it counts leading old rows absent from the new screen.
+func scrollShift(pre, post []string) int {
+	h := len(pre)
+	best, bestScore := 0, 0
+	for shift := 0; shift < h; shift++ {
+		score := 0
+		for i := 0; i+shift < h; i++ {
+			if pre[i+shift] != "" && post[i] == pre[i+shift] {
+				score++
+			}
+		}
+		if score > bestScore {
+			best, bestScore = shift, score
+		}
+	}
+	if bestScore > 0 {
+		return best
+	}
+
+	present := make(map[string]struct{}, h)
+	for _, t := range post {
+		if t != "" {
+			present[t] = struct{}{}
+		}
+	}
+	gone := 0
+	for _, t := range pre {
+		if t == "" {
+			continue
+		}
+		if _, ok := present[t]; ok {
+			break
+		}
+		gone++
+	}
+	return gone
 }
 
 // DrainScrollCapture returns and clears all lines captured during VT.Write()
