@@ -257,22 +257,6 @@ func makeGlyphs(format string, args ...any) ScrollbackLine {
 	return glyphs
 }
 
-func makeGlyphsWidth(text string, width int) ScrollbackLine {
-	glyphs := make(ScrollbackLine, width)
-	for i := 0; i < width; i++ {
-		ch := ' '
-		if i < len(text) {
-			ch = rune(text[i])
-		}
-		glyphs[i] = vt10x.Glyph{
-			Char: ch,
-			FG:   vt10x.DefaultFG,
-			BG:   vt10x.DefaultBG,
-		}
-	}
-	return glyphs
-}
-
 // ── Alt-screen diff capture tests ───────────────────────────────
 
 func TestPushAltScreenDiff_BasicCapture(t *testing.T) {

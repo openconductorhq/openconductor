@@ -45,7 +45,7 @@ func TestAtomicWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFile(t, filepath.Join(dir, "g"), "x", 0o644)
-	os.Remove(filepath.Join(dir, "g"))
+	_ = os.Remove(filepath.Join(dir, "g"))
 
 	// Existing file keeps its mode even when a looser perm is passed.
 	if err := os.Chmod(path, 0o600); err != nil {

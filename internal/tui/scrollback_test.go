@@ -1049,7 +1049,7 @@ func TestClearSelection(t *testing.T) {
 // alt-screen mode, for driving Session.CheckScrollback.
 func newAltScreenSession(width, height int) *session.Session {
 	vt := vt10x.New(vt10x.WithSize(width, height))
-	vt.Write([]byte("\x1b[?1049h"))
+	_, _ = vt.Write([]byte("\x1b[?1049h"))
 	return &session.Session{
 		ID:      "alt",
 		VT:      vt,

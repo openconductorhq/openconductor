@@ -9,10 +9,6 @@ import (
 	"github.com/openconductorhq/openconductor/internal/logging"
 )
 
-const (
-	lastLinesCount = 50
-)
-
 // Detector performs L1 heuristic-based attention detection on terminal
 // output, with optional L2 LLM-based escalation for uncertain results.
 //

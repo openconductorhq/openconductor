@@ -2574,7 +2574,7 @@ func TestWheelAltScreen_MouseMode_CoordinatesCorrect(t *testing.T) {
 func TestAttentionDetection_RunsOffUIThreadAndApplies(t *testing.T) {
 	app := NewApp(configWithProjects(), "", nil)
 	vt := vt10x.New(vt10x.WithSize(80, 10))
-	vt.Write([]byte("some context\r\nDo you want to proceed? (y/n)"))
+	_, _ = vt.Write([]byte("some context\r\nDo you want to proceed? (y/n)"))
 	app.mgr.InjectSession("proj1", &session.Session{
 		Project: app.cfg.Projects[0], VT: vt, State: session.StateRunning, Width: 80, Height: 10,
 	})
@@ -2631,7 +2631,7 @@ func TestAttentionResults_StaleResultsSendNoKeys(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			app := NewApp(configWithProjects(), "", nil)
 			vt := vt10x.New(vt10x.WithSize(80, 10))
-			vt.Write([]byte("Review your answers"))
+			_, _ = vt.Write([]byte("Review your answers"))
 			s := &session.Session{Project: app.cfg.Projects[0], VT: vt, State: session.StateRunning, Width: 80, Height: 10}
 			app.mgr.InjectSession("proj1", s)
 
