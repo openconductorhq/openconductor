@@ -4,9 +4,9 @@
 package tui
 
 import (
-	"strings"
-
 	"github.com/hinshun/vt10x"
+
+	"github.com/openconductorhq/openconductor/internal/session"
 )
 
 // defaultScrollbackCapacity is the maximum number of lines retained in the
@@ -59,7 +59,7 @@ func newScrollbackBuffer(capacity int) *scrollbackBuffer {
 // When full, the oldest line is overwritten (and its text removed from
 // the dedup set).
 func (b *scrollbackBuffer) Push(glyphs scrollbackLine) {
-	text := glyphsToText(glyphs)
+	text := session.GlyphsText(glyphs)
 
 	// Dedup: skip if this exact text is already in the buffer.
 	// Blank lines bypass dedup so that multiple blank separators are preserved.
@@ -102,7 +102,7 @@ func (b *scrollbackBuffer) Push(glyphs scrollbackLine) {
 // is legitimate content — repeated table rows, code patterns, etc. The
 // textSet is still maintained for correct eviction when the ring wraps.
 func (b *scrollbackBuffer) PushForce(glyphs scrollbackLine) {
-	text := glyphsToText(glyphs)
+	text := session.GlyphsText(glyphs)
 
 	idx := (b.start + b.len) % b.cap
 
@@ -219,19 +219,4 @@ func textToGlyphs(text string) scrollbackLine {
 		}
 	}
 	return glyphs
-}
-
-// glyphsToText converts a glyph slice to its text content, trimming trailing
-// spaces. Used for scroll shift detection.
-func glyphsToText(glyphs []vt10x.Glyph) string {
-	var sb strings.Builder
-	sb.Grow(len(glyphs))
-	for _, g := range glyphs {
-		if g.Char == 0 {
-			sb.WriteRune(' ')
-		} else {
-			sb.WriteRune(g.Char)
-		}
-	}
-	return strings.TrimRight(sb.String(), " ")
 }

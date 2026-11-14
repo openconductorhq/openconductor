@@ -18,6 +18,7 @@ import (
 	"github.com/hinshun/vt10x"
 
 	"github.com/openconductorhq/openconductor/internal/logging"
+	"github.com/openconductorhq/openconductor/internal/session"
 )
 
 // vt10x attribute flags — mirrored from unexported constants in vt10x/state.go.
@@ -315,7 +316,7 @@ func (m terminalModel) renderViewportRow(sb *strings.Builder, row int, cursorCol
 		}
 
 		if g.FG != curFG || g.BG != curBG || g.Mode != curMode {
-			sb.WriteString(glyphSGR(g))
+			writeGlyphSGR(sb, g)
 			curFG = g.FG
 			curBG = g.BG
 			curMode = g.Mode
@@ -365,7 +366,7 @@ func (m terminalModel) renderGlyphRow(sb *strings.Builder, glyphs []vt10x.Glyph,
 		}
 
 		if g.FG != curFG || g.BG != curBG || g.Mode != curMode {
-			sb.WriteString(glyphSGR(g))
+			writeGlyphSGR(sb, g)
 			curFG = g.FG
 			curBG = g.BG
 			curMode = g.Mode
@@ -628,7 +629,7 @@ func (m terminalModel) plainTextScrollbackOnly() string {
 		lineIdx := startIdx + i
 		if lineIdx >= 0 && lineIdx < sbLen {
 			if glyphs := m.scrollback.Line(lineIdx); glyphs != nil {
-				lines = append(lines, glyphsToText(glyphs))
+				lines = append(lines, session.GlyphsText(glyphs))
 				continue
 			}
 		}
@@ -655,7 +656,7 @@ func (m terminalModel) plainTextScrollbackMixed() string {
 	for i := 0; i < fromScrollback; i++ {
 		lineIdx := sbLen - offset + i
 		if glyphs := m.scrollback.Line(lineIdx); glyphs != nil {
-			lines = append(lines, glyphsToText(glyphs))
+			lines = append(lines, session.GlyphsText(glyphs))
 		} else {
 			lines = append(lines, "")
 		}
@@ -678,10 +679,9 @@ func (m terminalModel) plainTextScrollbackMixed() string {
 	return strings.Join(lines, "\n")
 }
 
-// glyphSGR returns an SGR escape sequence that sets the terminal attributes
+// writeGlyphSGR writes an SGR escape sequence that sets the terminal attributes
 // to match the given vt10x glyph's foreground, background, and mode.
-func glyphSGR(g vt10x.Glyph) string {
-	var sb strings.Builder
+func writeGlyphSGR(sb *strings.Builder, g vt10x.Glyph) {
 	sb.WriteString("\x1b[0") // reset as base
 
 	if g.Mode&vtAttrBold != 0 {
@@ -710,7 +710,6 @@ func glyphSGR(g vt10x.Glyph) string {
 	}
 
 	sb.WriteByte('m')
-	return sb.String()
 }
 
 // colorSGR converts a vt10x Color to an SGR parameter string.
@@ -773,7 +772,7 @@ func (m *terminalModel) captureAndWrite(data []byte) {
 	oldGlyphs := m.snapshotGlyphs()
 	oldTexts := make([]string, len(oldGlyphs))
 	for i, row := range oldGlyphs {
-		oldTexts[i] = glyphsToText(row)
+		oldTexts[i] = session.GlyphsText(row)
 	}
 
 	// Write to vt10x — this may destroy the top rows via scrollUp().
@@ -825,17 +824,7 @@ func (m *terminalModel) snapshotGlyphs() []scrollbackLine {
 // viewportRowText returns the text content of a single viewport row,
 // trimmed of trailing spaces. Must be called with mu held.
 func (m *terminalModel) viewportRowText(row int) string {
-	var sb strings.Builder
-	sb.Grow(m.width)
-	for col := 0; col < m.width; col++ {
-		g := m.vt.Cell(col, row)
-		if g.Char == 0 {
-			sb.WriteRune(' ')
-		} else {
-			sb.WriteRune(g.Char)
-		}
-	}
-	return strings.TrimRight(sb.String(), " ")
+	return session.RowText(m.vt, row, m.width)
 }
 
 // ── Scroll navigation ───────────────────────────────────────────
@@ -909,16 +898,7 @@ func (m *terminalModel) GetScreenLines() []string {
 
 	lines := make([]string, m.height)
 	for row := 0; row < m.height; row++ {
-		var sb strings.Builder
-		for col := 0; col < m.width; col++ {
-			g := m.vt.Cell(col, row)
-			if g.Char == 0 {
-				sb.WriteRune(' ')
-			} else {
-				sb.WriteRune(g.Char)
-			}
-		}
-		lines[row] = strings.TrimRight(sb.String(), " ")
+		lines[row] = session.RowText(m.vt, row, m.width)
 	}
 	return lines
 }

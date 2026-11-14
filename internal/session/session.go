@@ -228,16 +228,7 @@ func (s *Session) GetScreenLines() []string {
 
 	lines := make([]string, h)
 	for row := 0; row < h; row++ {
-		var sb strings.Builder
-		for col := 0; col < s.Width; col++ {
-			g := s.VT.Cell(col, row)
-			if g.Char == 0 {
-				sb.WriteRune(' ')
-			} else {
-				sb.WriteRune(g.Char)
-			}
-		}
-		lines[row] = strings.TrimRight(sb.String(), " ")
+		lines[row] = RowText(s.VT, row, s.Width)
 	}
 	return lines
 }
@@ -341,17 +332,10 @@ func (s *Session) captureScrollOff(data []byte) {
 	w := s.Width
 	for row := 0; row < h; row++ {
 		glyphs := make([]vt10x.Glyph, w)
-		var sb strings.Builder
 		for col := 0; col < w; col++ {
-			g := vt.Cell(col, row)
-			glyphs[col] = g
-			if g.Char == 0 {
-				sb.WriteRune(' ')
-			} else {
-				sb.WriteRune(g.Char)
-			}
+			glyphs[col] = vt.Cell(col, row)
 		}
-		preTexts[row] = strings.TrimRight(sb.String(), " ")
+		preTexts[row] = GlyphsText(glyphs)
 		preGlyphs[row] = glyphs
 	}
 
@@ -361,16 +345,7 @@ func (s *Session) captureScrollOff(data []byte) {
 	// Detect how many rows scrolled off by finding where old content
 	// ended up in the new screen. Check multiple old rows against the
 	// new screen to find the shift.
-	var sb strings.Builder
-	for col := 0; col < w; col++ {
-		g := vt.Cell(col, 0)
-		if g.Char == 0 {
-			sb.WriteRune(' ')
-		} else {
-			sb.WriteRune(g.Char)
-		}
-	}
-	newRow0 := strings.TrimRight(sb.String(), " ")
+	newRow0 := RowText(vt, 0, w)
 
 	scrolled := 0
 	for shift := 1; shift < h; shift++ {
@@ -391,17 +366,7 @@ func (s *Session) captureScrollOff(data []byte) {
 	if scrolled == 0 {
 		newTexts := make(map[string]struct{}, h)
 		for row := 0; row < h; row++ {
-			var sb strings.Builder
-			for col := 0; col < w; col++ {
-				g := vt.Cell(col, row)
-				if g.Char == 0 {
-					sb.WriteRune(' ')
-				} else {
-					sb.WriteRune(g.Char)
-				}
-			}
-			t := strings.TrimRight(sb.String(), " ")
-			if t != "" {
+			if t := RowText(vt, row, w); t != "" {
 				newTexts[t] = struct{}{}
 			}
 		}
@@ -506,4 +471,32 @@ func (s *Session) submit() {
 		time.Sleep(d)
 	}
 	s.Write([]byte("\r"))
+}
+
+// RowText returns the text of one VT row with trailing spaces trimmed.
+// Empty cells (Char == 0) read as spaces. Caller must hold the VT's lock.
+func RowText(vt vt10x.Terminal, row, width int) string {
+	var sb strings.Builder
+	sb.Grow(width)
+	for col := 0; col < width; col++ {
+		writeCellRune(&sb, vt.Cell(col, row).Char)
+	}
+	return strings.TrimRight(sb.String(), " ")
+}
+
+// GlyphsText returns the text of a glyph row with trailing spaces trimmed.
+func GlyphsText(glyphs []vt10x.Glyph) string {
+	var sb strings.Builder
+	sb.Grow(len(glyphs))
+	for _, g := range glyphs {
+		writeCellRune(&sb, g.Char)
+	}
+	return strings.TrimRight(sb.String(), " ")
+}
+
+func writeCellRune(sb *strings.Builder, r rune) {
+	if r == 0 {
+		r = ' '
+	}
+	sb.WriteRune(r)
 }

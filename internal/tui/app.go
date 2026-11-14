@@ -1680,11 +1680,11 @@ func (a *App) syncTerminalFromSession() {
 		return
 	}
 
-	vt, w, h := s.GetVT()
-
-	// Check alt-screen mode while we have the VT reference.
+	// One read lock for VT, size and alt-screen mode (this runs on every
+	// output chunk of the active session).
 	s.Mu.RLock()
-	alt := s.VT != nil && s.VT.Mode()&vt10x.ModeAltScreen != 0
+	vt, w, h := s.VT, s.Width, s.Height
+	alt := vt != nil && vt.Mode()&vt10x.ModeAltScreen != 0
 	s.Mu.RUnlock()
 
 	a.terminal.mu.Lock()
@@ -1823,7 +1823,7 @@ func (a *App) checkScrollback(s *session.Session, sessionID string) int {
 			glyphs[col] = s.VT.Cell(col, row)
 		}
 		curGlyphs[row] = glyphs
-		curTexts[row] = glyphsToText(glyphs)
+		curTexts[row] = session.GlyphsText(glyphs)
 	}
 
 	oldTexts := a.scrollSnapshots[sessionID]

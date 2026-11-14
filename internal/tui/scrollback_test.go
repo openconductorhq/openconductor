@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/hinshun/vt10x"
+
+	"github.com/openconductorhq/openconductor/internal/session"
 )
 
 // ── Ring buffer tests ───────────────────────────────────────────
@@ -35,8 +37,8 @@ func TestScrollbackBufferLineOrder(t *testing.T) {
 	buf.Push(makeGlyphs("second"))
 	buf.Push(makeGlyphs("third"))
 
-	got0 := glyphsToText(buf.Line(0))
-	got2 := glyphsToText(buf.Line(2))
+	got0 := session.GlyphsText(buf.Line(0))
+	got2 := session.GlyphsText(buf.Line(2))
 
 	if got0 != "first" {
 		t.Fatalf("Line(0): expected %q, got %q", "first", got0)
@@ -60,8 +62,8 @@ func TestScrollbackBufferWraparound(t *testing.T) {
 	}
 
 	// Oldest should now be "c", newest "e".
-	oldest := glyphsToText(buf.Line(0))
-	newest := glyphsToText(buf.Line(2))
+	oldest := session.GlyphsText(buf.Line(0))
+	newest := session.GlyphsText(buf.Line(2))
 
 	if oldest != "c" {
 		t.Fatalf("oldest: expected %q, got %q", "c", oldest)
@@ -318,7 +320,7 @@ func TestCaptureAndWriteDetectsScroll(t *testing.T) {
 	// "line A" was already destroyed by the initial vt.Write() calls (which
 	// bypass captureAndWrite). The captureAndWrite call saves "line B" —
 	// the top row at the time of the scrolling write.
-	oldest := glyphsToText(tm.scrollback.Line(0))
+	oldest := session.GlyphsText(tm.scrollback.Line(0))
 	if !strings.HasPrefix(oldest, "line B") {
 		t.Fatalf("expected oldest scrollback to start with 'line B', got %q", oldest)
 	}
@@ -631,7 +633,7 @@ func TestCaptureScrollbackTUIFullRedraw(t *testing.T) {
 		t.Fatal("expected scrollback to capture a line from TUI full-screen redraw")
 	}
 
-	captured := glyphsToText(tm.scrollback.Line(tm.scrollback.Len() - 1))
+	captured := session.GlyphsText(tm.scrollback.Line(tm.scrollback.Len() - 1))
 	// The captured line should be one of the content rows that scrolled off.
 	// With shift=1, row 1 ("Line 1 of response") should be captured.
 	if !strings.Contains(captured, "Line 1") {
@@ -788,7 +790,7 @@ func TestPushAltScreenDiff_BasicCapture(t *testing.T) {
 
 	// Verify correct content was captured.
 	for i := 0; i < 4; i++ {
-		got := glyphsToText(sb.Line(i))
+		got := session.GlyphsText(sb.Line(i))
 		expected := fmt.Sprintf("old content line%d", i+1)
 		if got != expected {
 			t.Errorf("line %d: got %q, want %q", i, got, expected)
@@ -913,7 +915,7 @@ func TestScrollbackDedup_SkipsDuplicates(t *testing.T) {
 		t.Fatalf("expected len=1 after dedup, got %d", buf.Len())
 	}
 
-	got := glyphsToText(buf.Line(0))
+	got := session.GlyphsText(buf.Line(0))
 	if got != "hello world" {
 		t.Fatalf("expected %q, got %q", "hello world", got)
 	}
@@ -973,7 +975,7 @@ func TestScrollbackDedup_BufferEvictsOnWraparound(t *testing.T) {
 
 	// Now "original line" has been evicted — re-push should succeed.
 	buf.Push(makeGlyphs("original line"))
-	newest := glyphsToText(buf.Line(buf.Len() - 1))
+	newest := session.GlyphsText(buf.Line(buf.Len() - 1))
 	if newest != "original line" {
 		t.Fatalf("expected newest line to be %q after re-push, got %q", "original line", newest)
 	}
@@ -1057,7 +1059,7 @@ func TestPushAltScreenDiff_ChromeSkipping(t *testing.T) {
 
 	// Verify the status bar row was NOT pushed.
 	for i := 0; i < sb.Len(); i++ {
-		line := glyphsToText(sb.Line(i))
+		line := session.GlyphsText(sb.Line(i))
 		if strings.Contains(line, "Build") {
 			t.Errorf("status bar row should not be in scrollback, found at index %d: %q", i, line)
 		}
@@ -1085,7 +1087,7 @@ func TestTextToGlyphs_BasicString(t *testing.T) {
 	if len(glyphs) != 5 {
 		t.Fatalf("expected 5 glyphs, got %d", len(glyphs))
 	}
-	got := glyphsToText(glyphs)
+	got := session.GlyphsText(glyphs)
 	if got != "hello" {
 		t.Errorf("round-trip: expected %q, got %q", "hello", got)
 	}
@@ -1100,7 +1102,7 @@ func TestTextToGlyphs_EmptyString(t *testing.T) {
 
 func TestTextToGlyphs_Unicode(t *testing.T) {
 	glyphs := textToGlyphs("── You ──")
-	got := glyphsToText(glyphs)
+	got := session.GlyphsText(glyphs)
 	if got != "── You ──" {
 		t.Errorf("expected %q, got %q", "── You ──", got)
 	}
@@ -1124,12 +1126,12 @@ func TestTextToGlyphs_PushedToScrollback(t *testing.T) {
 		t.Fatalf("expected 5 lines in scrollback, got %d", buf.Len())
 	}
 
-	got := glyphsToText(buf.Line(0))
+	got := session.GlyphsText(buf.Line(0))
 	if !strings.HasPrefix(got, "── You") {
 		t.Errorf("first line should be You header, got %q", got)
 	}
 
-	got = glyphsToText(buf.Line(1))
+	got = session.GlyphsText(buf.Line(1))
 	if got != "Fix the login bug" {
 		t.Errorf("second line: expected %q, got %q", "Fix the login bug", got)
 	}
@@ -1191,7 +1193,7 @@ func TestAltScreenScrollNoDuplication(t *testing.T) {
 				glyphs[col] = vt.Cell(col, row)
 			}
 			curGlyphs[row] = glyphs
-			curTexts[row] = glyphsToText(glyphs)
+			curTexts[row] = session.GlyphsText(glyphs)
 		}
 
 		// Run the same diff logic as checkScrollback for alt-screen.
@@ -1247,7 +1249,7 @@ func TestAltScreenScrollNoDuplication(t *testing.T) {
 	// the minAltDiffRows threshold skipping small diffs).
 	sbTexts := make([]string, tm.scrollback.Len())
 	for i := 0; i < tm.scrollback.Len(); i++ {
-		sbTexts[i] = glyphsToText(tm.scrollback.Line(i))
+		sbTexts[i] = session.GlyphsText(tm.scrollback.Line(i))
 	}
 	t.Logf("scrollback content (first 10): %v", sbTexts[:min(10, len(sbTexts))])
 	t.Logf("scrollback content (last 10): %v", sbTexts[max(0, len(sbTexts)-10):])
@@ -1355,7 +1357,7 @@ func TestAltScreenScrollHalfPageNoDuplication(t *testing.T) {
 				glyphs[col] = vt.Cell(col, row)
 			}
 			curGlyphs[row] = glyphs
-			curTexts[row] = glyphsToText(glyphs)
+			curTexts[row] = session.GlyphsText(glyphs)
 		}
 
 		if prevTexts != nil {
@@ -1470,7 +1472,7 @@ func TestAltScreenTraditionalScrollPathNoDuplication(t *testing.T) {
 				glyphs[col] = vt.Cell(col, row)
 			}
 			curGlyphs[row] = glyphs
-			curTexts[row] = glyphsToText(glyphs)
+			curTexts[row] = session.GlyphsText(glyphs)
 		}
 
 		if prevTexts != nil {
@@ -1600,7 +1602,7 @@ func TestAltScreenScrollMixedCapturePaths(t *testing.T) {
 				glyphs[col] = vt.Cell(col, row)
 			}
 			curGlyphs[row] = glyphs
-			curTexts[row] = glyphsToText(glyphs)
+			curTexts[row] = session.GlyphsText(glyphs)
 		}
 
 		if prevTexts != nil {

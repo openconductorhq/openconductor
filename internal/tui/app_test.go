@@ -1165,7 +1165,7 @@ func TestScrollbackE2EOpenCodeScenario(t *testing.T) {
 	}
 
 	// Verify the earliest captured line contains the expected content.
-	oldest := glyphsToText(app.scrollbacks["stocks"].Line(0))
+	oldest := session.GlyphsText(app.scrollbacks["stocks"].Line(0))
 	if !strings.Contains(oldest, "Line") {
 		t.Fatalf("expected oldest scrollback line to contain 'Line', got %q", oldest)
 	}
