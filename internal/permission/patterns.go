@@ -12,13 +12,18 @@ import (
 
 // bashSafeCommands is the set of shell commands considered low-risk.
 // This list is used by both L1 pattern matching and the L2 classifier prompt.
+// Commands that run arbitrary inline code (python -c, node -e, env CMD,
+// source, find -exec/-delete) are deliberately absent.
 var bashSafeCommands = []string{
-	"git", "ls", "cat", "head", "tail", "grep", "find",
-	"npm", "yarn", "pnpm", "node",
-	"go", "cargo", "pip", "pip3", "pytest", "python", "python3",
-	"ruby", "java", "make", "echo", "pwd", "mkdir", "which",
-	"env", "printenv", "source", "export",
+	"git", "ls", "cat", "head", "tail", "grep",
+	"npm", "yarn", "pnpm",
+	"go", "cargo", "pip", "pip3", "pytest",
+	"make", "echo", "pwd", "mkdir", "which", "printenv",
 }
+
+// shellMeta are characters that chain, redirect or substitute commands. A
+// command containing any of them is never BashSafe, whatever its first word.
+const shellMeta = ";&|`$<>"
 
 // BashSafeCommandSet returns the bash-safe command list as a set for O(1) lookup.
 func BashSafeCommandSet() map[string]bool {
@@ -123,20 +128,26 @@ var genericPatterns = []patternRule{
 //
 // For BashAny matches, the function inspects the command name to decide whether
 // it should be downgraded to BashSafe.
+//
+// Lines are scanned bottom-up: the active dialog is at the bottom of the
+// screen, so conversation text or an old dialog above it must not decide
+// the category.
 func TryMatch(agentType config.AgentType, lines []string) *ParsedPermission {
 	rules := rulesFor(agentType)
-	text := strings.Join(lines, "\n")
 
-	for _, rule := range rules {
-		if rule.re.MatchString(text) {
+	for i := len(lines) - 1; i >= 0; i-- {
+		for _, rule := range rules {
+			if !rule.re.MatchString(lines[i]) {
+				continue
+			}
 			cat := rule.category
 			// Refine BashAny → BashSafe if the command is on the safe list.
 			if cat == BashAny {
-				cat = refineBashCategory(text)
+				cat = refineBashCategory(strings.Join(lines[i:], "\n"))
 			}
 			return &ParsedPermission{
 				Category:    cat,
-				Description: extractDescription(text),
+				Description: extractDescription(strings.Join(lines, "\n")),
 				Confidence:  1.0,
 				Source:      "pattern",
 			}
@@ -169,9 +180,9 @@ var bashCmdPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)running\s+(\w+)`),
 }
 
-// refineBashCategory inspects the terminal text for the actual command name
-// being executed and returns BashSafe if it is on the safe list, otherwise
-// BashAny.
+// refineBashCategory inspects the dialog text for the actual command name
+// being executed and returns BashSafe if it is on the safe list and the
+// command contains no shell metacharacters, otherwise BashAny.
 //
 // It tries patterns in priority order — most specific first — so that
 // "Allow running bash command: git status" resolves to "git" (via
@@ -180,16 +191,16 @@ func refineBashCategory(text string) Category {
 	safe := BashSafeCommandSet()
 
 	for _, re := range bashCmdPatterns {
-		m := re.FindStringSubmatch(text)
-		if len(m) < 2 {
+		m := re.FindStringSubmatchIndex(text)
+		if m == nil {
 			continue
 		}
-		cmd := strings.ToLower(m[1])
+		cmd := strings.ToLower(text[m[2]:m[3]])
 		// Skip shell names — they are the executor, not the command.
 		if cmd == "bash" || cmd == "sh" || cmd == "zsh" || cmd == "fish" {
 			continue
 		}
-		if safe[cmd] {
+		if safe[cmd] && !strings.ContainsAny(text[m[2]:], shellMeta) {
 			return BashSafe
 		}
 		return BashAny

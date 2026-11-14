@@ -113,7 +113,10 @@ Valid categories:
 - "unknown"     — cannot determine the permission type
 
 Set confidence to 1.0 if certain, lower if uncertain. Only set bash_safe if the
-command is explicitly one of the safe commands listed above.
+command is explicitly one of the safe commands listed above and contains no
+chaining, pipes, redirects or substitution (; & | > < $ or backticks).
+Classify the permission dialog at the bottom of the output; ignore earlier
+conversation text and old dialogs above it.
 
 Terminal output:
 ---
