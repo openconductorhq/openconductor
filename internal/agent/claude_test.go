@@ -1067,3 +1067,18 @@ func TestClaudeCode_IsChromeLine(t *testing.T) {
 		}
 	}
 }
+
+func TestEncodeClaudeProjectPath(t *testing.T) {
+	// Expected values observed from Claude Code 2.1 on disk.
+	tests := []struct{ in, want string }{
+		{"/home/u/Development/openconductor", "-home-u-Development-openconductor"},
+		{"/home/u/ahavat-zion/.claude/worktrees/x", "-home-u-ahavat-zion--claude-worktrees-x"},
+		{"/tmp/enc_t.e st+x@y", "-tmp-enc-t-e-st-x-y"},
+		{"/tmp/encב😀z", "-tmp-enc---z"},
+	}
+	for _, tt := range tests {
+		if got := encodeClaudeProjectPath(tt.in); got != tt.want {
+			t.Errorf("encodeClaudeProjectPath(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

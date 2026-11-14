@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/openconductorhq/openconductor/internal/attention"
@@ -56,18 +57,10 @@ func (a *claudeAdapter) Command(repoPath string, opts LaunchOptions) *exec.Cmd {
 // ~/.claude/projects/<path-encoded-dir>/. If no sessions exist, --continue
 // would cause Claude Code to print "No conversation found" and exit.
 func hasClaudeSession(repoPath string) bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	dir := claudeProjectDir(repoPath)
+	if dir == "" {
 		return false
 	}
-	// Claude Code encodes the repo path by:
-	// 1. Stripping the trailing slash (if any)
-	// 2. Replacing "/" and "_" with "-"
-	// Example: "/Users/amir/Development/safe_gan/" → "-Users-amir-Development-safe-gan"
-	clean := strings.TrimRight(repoPath, "/")
-	encoded := strings.ReplaceAll(clean, "/", "-")
-	encoded = strings.ReplaceAll(encoded, "_", "-")
-	dir := filepath.Join(home, ".claude", "projects", encoded)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false
@@ -604,23 +597,24 @@ func (a *claudeAdapter) LoadHistory(repoPath string) ([]string, error) {
 }
 
 // claudeProjectDir returns the Claude Code project directory for the given
-// repo path, or "" if it does not exist. Claude Code encodes paths by
-// replacing "/" with "-", e.g. "/Users/amir/foo" → "-Users-amir-foo".
+// repo path, or "" if it does not exist.
 func claudeProjectDir(repoPath string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
 
-	// Resolve symlinks and clean the path for consistent encoding.
+	// Claude Code keys projects by its working directory as the OS reports
+	// it: absolute, clean, symlinks resolved.
 	absPath, err := filepath.Abs(repoPath)
 	if err != nil {
 		absPath = repoPath
 	}
-	absPath = filepath.Clean(absPath)
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = resolved
+	}
 
-	encoded := strings.ReplaceAll(absPath, string(filepath.Separator), "-")
-	dir := filepath.Join(home, ".claude", "projects", encoded)
+	dir := filepath.Join(home, ".claude", "projects", encodeClaudeProjectPath(absPath))
 
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
@@ -786,4 +780,20 @@ func extractAssistantText(raw json.RawMessage) string {
 		}
 	}
 	return strings.Join(texts, "\n")
+}
+
+// encodeClaudeProjectPath encodes a directory the way Claude Code names its
+// ~/.claude/projects entries: every UTF-16 code unit other than an ASCII
+// letter or digit becomes "-", e.g. "/home/u/my_app.v2" → "-home-u-my-app-v2"
+// and an emoji becomes "--". Verified against Claude Code 2.1.
+func encodeClaudeProjectPath(p string) string {
+	var sb strings.Builder
+	for _, r := range p {
+		if 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' {
+			sb.WriteRune(r)
+			continue
+		}
+		sb.WriteString(strings.Repeat("-", utf16.RuneLen(r)))
+	}
+	return sb.String()
 }
