@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -2240,6 +2242,7 @@ func (a *App) markWorking(sessionID, projectName string) {
 
 // attentionInput is a UI-thread snapshot of one session for detection.
 type attentionInput struct {
+	sess       *session.Session
 	sessionID  string
 	project    config.Project
 	lines      []string
@@ -2250,6 +2253,7 @@ type attentionInput struct {
 
 // attentionResult is the detection outcome for one session.
 type attentionResult struct {
+	sess      *session.Session
 	sessionID string
 	lines     []string
 	event     *attention.AttentionEvent
@@ -2270,7 +2274,7 @@ func (a *App) detectAttentionCmd() tea.Cmd {
 		if lines == nil {
 			continue
 		}
-		in := attentionInput{sessionID: s.ID, project: s.Project, lines: lines}
+		in := attentionInput{sess: s, sessionID: s.ID, project: s.Project, lines: lines}
 		if s.Cmd != nil {
 			in.pid = s.Cmd.Pid
 		}
@@ -2292,17 +2296,24 @@ func (a *App) detectAttentionCmd() tea.Cmd {
 	detector, approver := a.detector, a.autoApprover
 	return func() tea.Msg {
 		ctx := context.Background()
-		results := make(attentionResultsMsg, 0, len(inputs))
-		for _, in := range inputs {
-			event, isWorking := detector.Check(ctx, in.sessionID, in.lines, in.pid, in.checker)
-			r := attentionResult{sessionID: in.sessionID, lines: in.lines, event: event, isWorking: isWorking}
-			if event != nil && len(event.AutoKeystroke) == 0 &&
-				event.Type == attention.NeedsPermission && approver != nil && in.keystrokes != nil {
-				res := approver.CheckAndApprove(ctx, in.project, in.lines, *in.keystrokes)
-				r.approve = &res
-			}
-			results = append(results, r)
+		// Sessions run in parallel so one slow L2 call doesn't delay the rest.
+		results := make(attentionResultsMsg, len(inputs))
+		var wg sync.WaitGroup
+		for i, in := range inputs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				event, isWorking := detector.Check(ctx, in.sessionID, in.lines, in.pid, in.checker)
+				r := attentionResult{sess: in.sess, sessionID: in.sessionID, lines: in.lines, event: event, isWorking: isWorking}
+				if event != nil && len(event.AutoKeystroke) == 0 &&
+					event.Type == attention.NeedsPermission && approver != nil && in.keystrokes != nil {
+					res := approver.CheckAndApprove(ctx, in.project, in.lines, *in.keystrokes)
+					r.approve = &res
+				}
+				results[i] = r
+			}()
 		}
+		wg.Wait()
 		return results
 	}
 }
@@ -2318,8 +2329,8 @@ func (a *App) applyAttention(results attentionResultsMsg) {
 
 	for _, r := range results {
 		s := a.mgr.GetSession(r.sessionID)
-		if s == nil {
-			continue // closed while detection was running
+		if s == nil || s != r.sess {
+			continue // closed or restarted (IDs are reused) while detection ran
 		}
 		sessionID := s.ID
 		projectName := s.Project.Name
@@ -2336,6 +2347,15 @@ func (a *App) applyAttention(results attentionResultsMsg) {
 			"isWorking", isWorking,
 		)
 		if event != nil {
+			// Keystrokes were chosen for the snapshot screen. If it has
+			// changed since (user typed, dialog moved on), drop this result;
+			// the next pass re-detects against the current screen.
+			sendsKeys := len(event.AutoKeystroke) > 0 || (r.approve != nil && r.approve.ShouldApprove)
+			if sendsKeys && !slices.Equal(s.GetScreenLines(), lines) {
+				logging.Debug("attention: screen changed during detection, skipping keystroke", "session", sessionID)
+				continue
+			}
+
 			// Adapter-requested auto-confirm (e.g. OpenCode's "Always allow"
 			// second stage, or a question review screen whose answers were
 			// already given). Must run BEFORE auto-approve — otherwise
@@ -2379,7 +2399,8 @@ func (a *App) applyAttention(results attentionResultsMsg) {
 						"bytesLen", len(result.Keystroke),
 					)
 					// WriteKeystroke may sleep for the agent's submit delay;
-					// keep that off the UI thread.
+					// keep that off the UI thread. It holds the session's
+					// input lock, so user keys can't land mid-sequence.
 					go s.WriteKeystroke(result.Keystroke)
 					a.markWorking(sessionID, projectName)
 					continue

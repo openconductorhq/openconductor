@@ -53,7 +53,11 @@ type Session struct {
 
 	Mu            sync.RWMutex
 	Width, Height int
-	closed        bool
+
+	closed bool
+	// inputMu serializes PTY input so multi-part sequences (keys, delay,
+	// Enter) are never interleaved with other writes.
+	inputMu sync.Mutex
 }
 
 // ScrollCapturedLine holds a single terminal row captured as it scrolled
@@ -178,6 +182,12 @@ func (s *Session) StartCmd(cmd *exec.Cmd, width, height int) error {
 
 // Write sends data to the PTY (i.e. user keyboard input).
 func (s *Session) Write(data []byte) {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	s.write(data)
+}
+
+func (s *Session) write(data []byte) {
 	s.Mu.RLock()
 	defer s.Mu.RUnlock()
 
@@ -450,7 +460,9 @@ func (s *Session) Close() {
 // then sends Enter (\r). The delay lets TUI agents (e.g. OpenCode) process
 // the typed characters before the submit key arrives.
 func (s *Session) SubmitText(text string) {
-	s.Write([]byte(text))
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	s.write([]byte(text))
 	s.submit()
 }
 
@@ -459,7 +471,9 @@ func (s *Session) SubmitText(text string) {
 // is a navigation sequence (e.g. OpenCode's arrow keys) and is confirmed with
 // Enter after the agent's submit delay.
 func (s *Session) WriteKeystroke(ks []byte) {
-	s.Write(ks)
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	s.write(ks)
 	if len(ks) > 0 && (ks[len(ks)-1] == '\r' || ks[len(ks)-1] == '\n') {
 		return
 	}
@@ -470,7 +484,7 @@ func (s *Session) submit() {
 	if d := agent.GetSubmitDelay(s.Project.Agent); d > 0 {
 		time.Sleep(d)
 	}
-	s.Write([]byte("\r"))
+	s.write([]byte("\r"))
 }
 
 // RowText returns the text of one VT row with trailing spaces trimmed.

@@ -2611,3 +2611,38 @@ func TestAttentionResults_IgnoresClosedSession(t *testing.T) {
 		t.Error("expected in-flight flag cleared")
 	}
 }
+
+func TestAttentionResults_StaleResultsSendNoKeys(t *testing.T) {
+	auto := &attention.AttentionEvent{Type: attention.NeedsInput, AutoKeystroke: []byte("\r")}
+	tests := []struct {
+		name      string
+		otherSess bool     // result belongs to an earlier session with the same ID
+		lines     []string // nil = use the current screen
+		want      SessionState
+	}{
+		{name: "current screen sends keys", want: StateWorking},
+		{name: "screen changed", lines: []string{"old dialog"}, want: StateIdle},
+		{name: "session restarted under same ID", otherSess: true, want: StateIdle},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := NewApp(configWithProjects(), "", nil)
+			vt := vt10x.New(vt10x.WithSize(80, 10))
+			vt.Write([]byte("Review your answers"))
+			s := &session.Session{Project: app.cfg.Projects[0], VT: vt, State: session.StateRunning, Width: 80, Height: 10}
+			app.mgr.InjectSession("proj1", s)
+
+			r := attentionResult{sess: s, sessionID: "proj1", lines: s.GetScreenLines(), event: auto}
+			if tt.lines != nil {
+				r.lines = tt.lines
+			}
+			if tt.otherSess {
+				r.sess = &session.Session{}
+			}
+			app.applyAttention(attentionResultsMsg{r})
+			if got := app.sessionStates["proj1"]; got != tt.want {
+				t.Errorf("state = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
