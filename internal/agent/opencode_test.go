@@ -746,7 +746,7 @@ func TestOpenCode_AlwaysAllowConfirmDialog(t *testing.T) {
 	if event == nil || event.Type != attention.NeedsPermission {
 		t.Fatalf("expected NeedsPermission, got %v", event)
 	}
-	if !strings.Contains(event.Detail, "auto-confirm") {
+	if event.AutoKeystroke == nil {
 		t.Errorf("expected 'auto-confirm' in detail, got %q", event.Detail)
 	}
 }
@@ -787,7 +787,7 @@ func TestOpenCode_QuestionSeriesIntermediateTab(t *testing.T) {
 	if event == nil || event.Type != attention.NeedsAnswer {
 		t.Fatalf("expected NeedsAnswer, got %v", event)
 	}
-	if strings.Contains(event.Detail, "confirm tab") {
+	if event.AutoKeystroke != nil {
 		t.Error("intermediate tab should NOT be detected as confirm tab")
 	}
 }
@@ -810,7 +810,7 @@ func TestOpenCode_QuestionSeriesConfirmTab(t *testing.T) {
 	if event == nil || event.Type != attention.NeedsAnswer {
 		t.Fatalf("expected NeedsAnswer, got %v", event)
 	}
-	if !strings.Contains(event.Detail, "confirm tab") {
+	if event.AutoKeystroke == nil {
 		t.Errorf("expected 'confirm tab' in detail, got %q", event.Detail)
 	}
 }
@@ -834,7 +834,7 @@ func TestOpenCode_QuestionSingleSubmit_NotConfirmTab(t *testing.T) {
 		t.Fatalf("expected NeedsAnswer, got %v", event)
 	}
 	// Question dialog should win over confirm tab because it has "select".
-	if strings.Contains(event.Detail, "confirm tab") {
+	if event.AutoKeystroke != nil {
 		t.Error("single-question submit should NOT be detected as confirm tab")
 	}
 }
@@ -852,7 +852,7 @@ func TestOpenCode_ConfirmTabOverridesEscInterrupt(t *testing.T) {
 	if result != attention.Certain {
 		t.Errorf("expected Certain, got %v", result)
 	}
-	if event == nil || !strings.Contains(event.Detail, "confirm tab") {
+	if event == nil || event.AutoKeystroke == nil {
 		t.Errorf("expected confirm tab event, got %v", event)
 	}
 }

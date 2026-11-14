@@ -132,50 +132,29 @@ func WritePersonaBundle(
 	persona config.PersonaType,
 	customPersonas []config.CustomPersona,
 ) error {
-	// 1. Write instructions (agent-specific strategy).
 	switch agentType {
 	case config.AgentClaudeCode:
 		if err := WritePersonaSection(repoPath, agentType, persona, customPersonas); err != nil {
 			return fmt.Errorf("writing instructions: %w", err)
 		}
+		if err := writeClaudeMCPs(repoPath, persona); err != nil {
+			return fmt.Errorf("writing MCPs: %w", err)
+		}
+		if err := writeSkills(repoPath, persona); err != nil {
+			return fmt.Errorf("writing skills: %w", err)
+		}
+		if err := writePlugins(repoPath, persona); err != nil {
+			return fmt.Errorf("writing plugins: %w", err)
+		}
 	case config.AgentOpenCode:
 		if err := writeOpenCodeInstructions(repoPath, persona, customPersonas); err != nil {
 			return fmt.Errorf("writing instructions: %w", err)
 		}
-	}
-
-	// 2. Write MCPs.
-	if err := writeMCPs(repoPath, agentType, persona); err != nil {
-		return fmt.Errorf("writing MCPs: %w", err)
-	}
-
-	// 3. Write skills (Claude Code only).
-	if agentType == config.AgentClaudeCode {
-		if err := writeSkills(repoPath, persona); err != nil {
-			return fmt.Errorf("writing skills: %w", err)
+		if err := writeOpenCodeMCPs(repoPath, persona); err != nil {
+			return fmt.Errorf("writing MCPs: %w", err)
 		}
 	}
-
-	// 4. Write plugin enablement (Claude Code only).
-	if agentType == config.AgentClaudeCode {
-		if err := writePlugins(repoPath, persona); err != nil {
-			return fmt.Errorf("writing plugins: %w", err)
-		}
-	}
-
 	return nil
-}
-
-// writeMCPs dispatches MCP writing to the agent-specific implementation.
-func writeMCPs(repoPath string, agentType config.AgentType, persona config.PersonaType) error {
-	switch agentType {
-	case config.AgentClaudeCode:
-		return writeClaudeMCPs(repoPath, persona)
-	case config.AgentOpenCode:
-		return writeOpenCodeMCPs(repoPath, persona)
-	default:
-		return nil
-	}
 }
 
 // writeClaudeMCPs merges persona MCP servers into the project's .mcp.json.

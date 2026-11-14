@@ -279,9 +279,10 @@ func (a *claudeAdapter) CheckAttention(lastLines []string) (attention.HeuristicR
 	if hasQuestionReview {
 		// AskUserQuestion review screen — all questions answered. Auto-submit.
 		return attention.Certain, &attention.AttentionEvent{
-			Type:   attention.NeedsAnswer,
-			Detail: "claude code question confirm tab",
-			Source: "heuristic",
+			Type:          attention.NeedsAnswer,
+			Detail:        "claude code question confirm tab",
+			Source:        "heuristic",
+			AutoKeystroke: []byte("\r"),
 		}
 	}
 

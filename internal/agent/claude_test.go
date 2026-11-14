@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/openconductorhq/openconductor/internal/attention"
@@ -468,7 +467,7 @@ func TestClaudeCode_QuestionSingleFooter(t *testing.T) {
 	if event == nil || event.Type != attention.NeedsAnswer {
 		t.Fatalf("expected NeedsAnswer, got %v", event)
 	}
-	if strings.Contains(event.Detail, "confirm tab") {
+	if event.AutoKeystroke != nil {
 		t.Error("single question should not be confirm tab")
 	}
 }
@@ -511,7 +510,7 @@ func TestClaudeCode_QuestionReviewScreen(t *testing.T) {
 	if event == nil || event.Type != attention.NeedsAnswer {
 		t.Fatalf("expected NeedsAnswer, got %v", event)
 	}
-	if !strings.Contains(event.Detail, "confirm tab") {
+	if event.AutoKeystroke == nil {
 		t.Errorf("review screen should be detected as confirm tab, got %q", event.Detail)
 	}
 }

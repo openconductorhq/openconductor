@@ -2214,6 +2214,15 @@ func isAttentionState(s SessionState) bool {
 	return s == StateNeedsAttention || s == StateNeedsPermission || s == StateAsking || s == StateError || s == StateDone
 }
 
+// markWorking sets a session to Working after the app answered a dialog on
+// the user's behalf, clearing any sticky attention state.
+func (a *App) markWorking(sessionID, projectName string) {
+	a.sessionStates[sessionID] = StateWorking
+	a.statusbar.states[sessionID] = StateWorking
+	a.sidebar.states[projectName] = a.aggregateProjectState(projectName)
+	delete(a.stateStickUntil, sessionID)
+}
+
 // checkAttention runs attention detection on ALL sessions (not just the
 // active one) using the L1 heuristic detector with optional L2 LLM
 // escalation. Updates sidebar/statusbar state accordingly.
@@ -2261,28 +2270,25 @@ func (a *App) checkAttention() {
 			"isWorking", isWorking,
 		)
 		if event != nil {
-			// Auto-approve permission requests when the project is configured
-			// to do so and the classifier identifies the category as allowed.
-			// Auto-confirm "Always allow" second-stage dialog. After
-			// selecting "Allow always" on a permission (via auto-approve
-			// or Telegram button), OpenCode shows a confirmation dialog
-			// with "Confirm" already highlighted. Press Enter to proceed.
-			// Must run BEFORE auto-approve — otherwise auto-approve
-			// consumes the NeedsPermission event and sends the wrong
-			// keystroke to the confirm dialog.
-			if event.Type == attention.NeedsPermission && strings.Contains(event.Detail, "auto-confirm") {
-				s.Write([]byte("\r"))
-				a.sessionStates[sessionID] = StateWorking
-				a.statusbar.states[sessionID] = StateWorking
-				a.sidebar.states[projectName] = a.aggregateProjectState(projectName)
-				delete(a.stateStickUntil, sessionID)
+			// Adapter-requested auto-confirm (e.g. OpenCode's "Always allow"
+			// second stage, or a question review screen whose answers were
+			// already given). Must run BEFORE auto-approve — otherwise
+			// auto-approve consumes the NeedsPermission event and sends the
+			// wrong keystroke to the confirm dialog.
+			if len(event.AutoKeystroke) > 0 {
+				s.Write(event.AutoKeystroke)
+				a.markWorking(sessionID, projectName)
 				delete(a.autoApproveRuns, sessionID)
-				logging.Info("auto-confirm: confirmed always-allow dialog",
+				logging.Info("auto-confirm",
 					"project", projectName,
 					"session", sessionID,
+					"detail", event.Detail,
 				)
 				continue
 			}
+
+			// Auto-approve permission requests when the project is configured
+			// to do so and the classifier identifies the category as allowed.
 
 			if event.Type == attention.NeedsPermission && a.autoApprover != nil {
 				adapter, adapterErr := agent.Get(s.Project.Agent)
@@ -2316,31 +2322,11 @@ func (a *App) checkAttention() {
 								"bytesLen", len(result.Keystroke),
 							)
 							s.WriteKeystroke(result.Keystroke)
-							a.sessionStates[sessionID] = StateWorking
-							a.statusbar.states[sessionID] = StateWorking
-							a.sidebar.states[projectName] = a.aggregateProjectState(projectName)
-							delete(a.stateStickUntil, sessionID)
+							a.markWorking(sessionID, projectName)
 							continue
 						}
 					}
 				}
-			}
-
-			// Auto-confirm question series Confirm tab. After the user
-			// answered all questions via Telegram buttons, the dialog
-			// auto-advances to a review screen. Press Enter to submit
-			// the collected answers so the agent can continue.
-			if event.Type == attention.NeedsAnswer && strings.Contains(event.Detail, "confirm tab") {
-				s.Write([]byte("\r"))
-				a.sessionStates[sessionID] = StateWorking
-				a.statusbar.states[sessionID] = StateWorking
-				a.sidebar.states[projectName] = a.aggregateProjectState(projectName)
-				delete(a.stateStickUntil, sessionID)
-				logging.Info("auto-confirm: submitted question series confirm tab",
-					"project", projectName,
-					"session", sessionID,
-				)
-				continue
 			}
 
 			state := attentionEventToState(event)

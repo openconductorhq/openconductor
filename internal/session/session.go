@@ -79,7 +79,7 @@ func NewSession(project config.Project) (*Session, error) {
 
 	// If the agent implements OutputFilter, create a per-session filter
 	// function to preprocess PTY output before vt10x.
-	if f := agent.GetOutputFilter(project.Agent); f != nil {
+	if f, ok := adapter.(agent.OutputFilter); ok {
 		s.outputFilter = f.NewOutputFilter()
 	}
 

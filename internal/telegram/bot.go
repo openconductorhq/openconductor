@@ -24,6 +24,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/openconductorhq/openconductor/internal/agent"
 	"github.com/openconductorhq/openconductor/internal/config"
 	"github.com/openconductorhq/openconductor/internal/logging"
 	"github.com/openconductorhq/openconductor/internal/session"
@@ -559,7 +560,7 @@ func (b *Bot) sendEvent(e Event) {
 		keyboard = &kb
 	case EventQuestion:
 		messages = FormatQuestion(e.Project, e.Screen)
-		options := ParseQuestionOptions(e.Screen)
+		options := agent.ParseQuestionOptions(e.Screen)
 		if len(options) > 0 {
 			kb := QuestionKeyboard(e.Project, options)
 			keyboard = &kb

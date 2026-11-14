@@ -312,9 +312,10 @@ func (a *opencodeAdapter) CheckAttention(lastLines []string) (attention.Heuristi
 	// waiting for user input.
 	if hasAlwaysAllowText && hasConfirmCancel {
 		return attention.Certain, &attention.AttentionEvent{
-			Type:   attention.NeedsPermission,
-			Detail: "opencode always-allow auto-confirm",
-			Source: "heuristic",
+			Type:          attention.NeedsPermission,
+			Detail:        "opencode always-allow auto-confirm",
+			Source:        "heuristic",
+			AutoKeystroke: []byte("\r"),
 		}
 	}
 
@@ -355,9 +356,10 @@ func (a *opencodeAdapter) CheckAttention(lastLines []string) (attention.Heuristi
 		// is showing. The user already provided answers via Telegram buttons;
 		// the attention loop auto-submits this by pressing Enter.
 		return attention.Certain, &attention.AttentionEvent{
-			Type:   attention.NeedsAnswer,
-			Detail: "opencode question confirm tab",
-			Source: "heuristic",
+			Type:          attention.NeedsAnswer,
+			Detail:        "opencode question confirm tab",
+			Source:        "heuristic",
+			AutoKeystroke: []byte("\r"),
 		}
 	}
 
