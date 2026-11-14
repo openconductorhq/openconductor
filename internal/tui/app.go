@@ -149,19 +149,6 @@ type App struct {
 	// the window expires.
 	ctrlCHint bool
 
-	// scrollbacks maps project names to their scrollback buffers.
-	// Each session gets its own buffer so scrollback is preserved
-	// when switching between tabs.
-	scrollbacks map[string]*scrollbackBuffer
-
-	// scrollSnapshots stores the last-known screen per project (text for
-	// shift detection, glyphs for scrollback capture). The scroll-check
-	// tick compares the current VT screen against these to detect lines
-	// that scrolled off. This decouples detection from individual PTY
-	// writes (which arrive in arbitrary chunks).
-	scrollSnapshots      map[string][]string
-	scrollGlyphSnapshots map[string][]scrollbackLine
-
 	// scrollDirty tracks which projects received new PTY output since
 	// the last scroll check. Only dirty projects are checked on tick.
 	scrollDirty map[string]bool
@@ -253,31 +240,28 @@ func NewApp(cfg *config.Config, configPath string, restoredState *config.AppStat
 	tabBarH := strings.Count(sampleTab, "\n") + 1
 
 	return App{
-		cfg:                  cfg,
-		configPath:           configPath,
-		sidebar:              sidebar,
-		terminal:             newTerminalModel(),
-		statusbar:            newStatusBarModel(cfg.Projects),
-		focus:                initialFocus,
-		active:               activeIdx,
-		mgr:                  session.NewManager(),
-		detector:             attention.NewDetector(),
-		sidebarWidth:         defaultSidebarWidth,
-		openTabs:             openTabs,
-		tabProjects:          make(map[string]string),
-		tabLabels:            tabLabels,
-		editingTab:           -1,
-		sessionStates:        make(map[string]SessionState),
-		stateStickUntil:      make(map[string]time.Time),
-		autoApproveRuns:      make(map[string]int),
-		scrollbacks:          make(map[string]*scrollbackBuffer),
-		scrollSnapshots:      make(map[string][]string),
-		scrollGlyphSnapshots: make(map[string][]scrollbackLine),
-		scrollDirty:          make(map[string]bool),
-		scrollOffsets:        make(map[string]int),
-		scrollPinned:         make(map[string]bool),
-		pendingRestoreTabs:   openTabs,
-		tabBarHeight:         tabBarH,
+		cfg:                cfg,
+		configPath:         configPath,
+		sidebar:            sidebar,
+		terminal:           newTerminalModel(),
+		statusbar:          newStatusBarModel(cfg.Projects),
+		focus:              initialFocus,
+		active:             activeIdx,
+		mgr:                session.NewManager(),
+		detector:           attention.NewDetector(),
+		sidebarWidth:       defaultSidebarWidth,
+		openTabs:           openTabs,
+		tabProjects:        make(map[string]string),
+		tabLabels:          tabLabels,
+		editingTab:         -1,
+		sessionStates:      make(map[string]SessionState),
+		stateStickUntil:    make(map[string]time.Time),
+		autoApproveRuns:    make(map[string]int),
+		scrollDirty:        make(map[string]bool),
+		scrollOffsets:      make(map[string]int),
+		scrollPinned:       make(map[string]bool),
+		pendingRestoreTabs: openTabs,
+		tabBarHeight:       tabBarH,
 	}
 }
 
@@ -1093,15 +1077,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case historyLoadedMsg:
-		if len(msg.Lines) > 0 {
-			sb := a.scrollbacks[msg.SessionID]
-			if sb == nil {
-				sb = newScrollbackBuffer(defaultScrollbackCapacity)
-				a.scrollbacks[msg.SessionID] = sb
-			}
+		if s := a.mgr.GetSession(msg.SessionID); s != nil && len(msg.Lines) > 0 {
+			sb := s.Scrollback()
 			for _, line := range msg.Lines {
-				glyphs := textToGlyphs(line)
-				sb.Push(glyphs)
+				sb.Push(session.TextToGlyphs(line))
 			}
 			logging.Info("scrollback: pre-populated history",
 				"session", msg.SessionID,
@@ -1696,14 +1675,7 @@ func (a *App) syncTerminalFromSession() {
 	a.terminal.altScreen = alt
 	a.terminal.sessionID = s.ID
 
-	// Point the terminal at this session's scrollback buffer.
-	id := s.ID
-	sb := a.scrollbacks[id]
-	if sb == nil {
-		sb = newScrollbackBuffer(defaultScrollbackCapacity)
-		a.scrollbacks[id] = sb
-	}
-	a.terminal.scrollback = sb
+	a.terminal.scrollback = s.Scrollback()
 }
 
 // runScrollCheck iterates over dirty projects and compares the current VT
@@ -1722,7 +1694,7 @@ func (a *App) runScrollCheck() {
 			continue
 		}
 
-		pushed := a.checkScrollback(s, sessionID)
+		pushed := s.CheckScrollback()
 
 		// If the user is scrolled up AND pinned (scrolled up into history,
 		// not scrolling back down), bump the offset so the view stays on
@@ -1738,242 +1710,6 @@ func (a *App) runScrollCheck() {
 			a.scrollOffsets[sessionID] += pushed
 		}
 	}
-}
-
-// checkScrollback detects lines that scrolled off the terminal viewport and
-// pushes them to the session's scrollback buffer. Returns the number of
-// lines pushed.
-//
-// Two detection strategies are used:
-//
-//  1. Session.captureScrollOff (non-alt-screen only): runs synchronously on
-//     every VT.Write() and reliably catches all scroll events. When captures
-//     are found, they are pushed with PushForce (no buffer-wide dedup) so that
-//     legitimate duplicate content — repeated table rows, code patterns, blank
-//     separator lines — is preserved exactly as it appeared. Snapshot-based
-//     detection is skipped to avoid dual-detection duplicates.
-//
-//  2. Snapshot-based detection (fallback): compares the current VT screen
-//     against the stored snapshot to detect scroll shifts or TUI repaints.
-//     Uses buffer-wide dedup (Push) to prevent flooding from alt-screen TUI
-//     apps that repaint every ~100ms.
-func (a *App) checkScrollback(s *session.Session, sessionID string) int {
-	sb := a.scrollbacks[sessionID]
-	if sb == nil {
-		sb = newScrollbackBuffer(defaultScrollbackCapacity)
-		a.scrollbacks[sessionID] = sb
-	}
-
-	s.Mu.RLock()
-	defer s.Mu.RUnlock()
-
-	if s.VT == nil {
-		return 0
-	}
-
-	w, h := s.Width, s.Height
-	altScreen := s.VT.Mode()&vt10x.ModeAltScreen != 0
-	isChrome := agent.GetChromeLineFilter(s.Project.Agent)
-
-	// ── Session-level captures (non-alt-screen only) ────────────────
-	//
-	// captureScrollOff runs per VT.Write() and catches every scroll event
-	// synchronously. When captures exist, use PushForce (no buffer-wide
-	// dedup) to preserve legitimate duplicate content (tables, code blocks,
-	// blank separator lines). Skip snapshot-based detection to avoid
-	// pushing the same lines twice.
-	captured := s.DrainScrollCapture()
-	if !altScreen && len(captured) > 0 {
-		pushed := 0
-		for _, cl := range captured {
-			if isChrome != nil && isChrome(cl.Text) {
-				continue
-			}
-			sb.PushForce(scrollbackLine(cl.Glyphs))
-			pushed++
-		}
-		return pushed
-	}
-
-	// ── Snapshot-based detection (alt-screen or no session captures) ─
-	cursorY := s.VT.Cursor().Y
-
-	// Build current screen snapshot (text + glyphs).
-	curTexts := make([]string, h)
-	curGlyphs := make([]scrollbackLine, h)
-	for row := 0; row < h; row++ {
-		glyphs := make(scrollbackLine, w)
-		for col := 0; col < w; col++ {
-			glyphs[col] = s.VT.Cell(col, row)
-		}
-		curGlyphs[row] = glyphs
-		curTexts[row] = session.GlyphsText(glyphs)
-	}
-
-	oldTexts := a.scrollSnapshots[sessionID]
-	oldGlyphs := a.scrollGlyphSnapshots[sessionID]
-
-	// First snapshot — just store it, nothing to compare.
-	if oldTexts == nil {
-		a.scrollSnapshots[sessionID] = curTexts
-		a.scrollGlyphSnapshots[sessionID] = curGlyphs
-		return 0
-	}
-
-	// Push any remaining session captures (with dedup for alt-screen safety).
-	for _, cl := range captured {
-		if isChrome != nil && isChrome(cl.Text) {
-			continue
-		}
-		sb.Push(scrollbackLine(cl.Glyphs))
-	}
-	pushed := len(captured)
-
-	// Detect scroll shift between last snapshot and current screen.
-	shift := detectScrollShift(oldTexts, curTexts)
-
-	// Count how many rows actually changed between snapshots.
-	changedRows := 0
-	for i := 0; i < len(oldTexts) && i < len(curTexts); i++ {
-		if oldTexts[i] != curTexts[i] {
-			changedRows++
-		}
-	}
-	if changedRows > 3 || shift > 0 {
-		logging.Debug("scrollback: snapshot diff",
-			"session", sessionID,
-			"shift", shift,
-			"changedRows", changedRows,
-			"totalRows", h,
-			"altScreen", altScreen,
-			"cursorY", cursorY,
-		)
-	}
-
-	if shift > 0 && oldGlyphs != nil {
-		// Traditional scroll detected — push scrolled-off rows.
-		// Find the first row that changed — skip fixed headers in TUI apps.
-		firstDiff := 0
-		for firstDiff < len(oldTexts) && firstDiff < len(curTexts) && oldTexts[firstDiff] == curTexts[firstDiff] {
-			firstDiff++
-		}
-
-		end := firstDiff + shift
-		if end > len(oldGlyphs) {
-			end = len(oldGlyphs)
-		}
-
-		for i := firstDiff; i < end; i++ {
-			if isChrome != nil && isChrome(oldTexts[i]) {
-				continue
-			}
-			sb.Push(oldGlyphs[i])
-			pushed++
-		}
-	} else if shift == 0 && altScreen && oldGlyphs != nil {
-		// Alt-screen TUI app: no traditional scroll, but the screen may have
-		// been fully repainted. Push old non-blank rows that disappeared from
-		// the new screen, so the user can scroll back to see previous content.
-		chromeTop, chromeBottom := agent.ChromeSkipRows(s.Project.Agent)
-		pushed = pushAltScreenDiff(sb, oldTexts, oldGlyphs, curTexts, chromeTop, chromeBottom, isChrome)
-	} else if shift == 0 && !altScreen && oldGlyphs != nil {
-		// Non-alt-screen CLI (e.g. Claude Code): large output burst replaced
-		// the entire visible area faster than detectScrollShift's maxShift
-		// (height/2) can track. Push old rows that disappeared, but ONLY
-		// rows above the cursor position — content at/below the cursor is
-		// "active" (spinner, prompt) being updated in-place, not content
-		// that scrolled off. Without this limit, the spinner line gets
-		// pushed to scrollback on every tick because its text changes
-		// (different time counter, animation character).
-		skipBottom := h - cursorY
-		if skipBottom < 0 {
-			skipBottom = 0
-		}
-		pushed = pushAltScreenDiff(sb, oldTexts, oldGlyphs, curTexts, 0, skipBottom, isChrome)
-	}
-
-	// Store current snapshot for next comparison.
-	a.scrollSnapshots[sessionID] = curTexts
-	a.scrollGlyphSnapshots[sessionID] = curGlyphs
-	return pushed
-}
-
-// pushAltScreenDiff pushes old screen rows that are non-blank and no longer
-// present in the new screen. This captures content that disappeared during a
-// TUI app full-screen repaint. Returns the number of lines pushed.
-//
-// chromeSkipFirst and chromeSkipLast specify the number of rows to exclude from
-// the top and bottom of the screen respectively. TUI apps typically have fixed
-// chrome (header, status bar, footer) that changes frequently (timer ticks,
-// token counters) and should not be pushed to scrollback.
-//
-// To avoid flooding scrollback with identical TUI frames, a row is only pushed
-// if it:
-//   - is non-blank in the old screen
-//   - is outside the chrome skip zones
-//   - does NOT appear at the same position in the new screen
-//   - does NOT appear ANYWHERE in the new screen (dedup against full content)
-//
-// At least minAltDiffRows rows must qualify — small diffs (1-2 rows) are
-// typically just cursor blinks or status updates, not meaningful content loss.
-func pushAltScreenDiff(sb *scrollbackBuffer, oldTexts []string, oldGlyphs []scrollbackLine, curTexts []string, chromeSkipFirst, chromeSkipLast int, isChrome func(string) bool) int {
-	const minAltDiffRows = 3
-
-	// Build a set of all current screen text for dedup.
-	curSet := make(map[string]struct{}, len(curTexts))
-	for _, t := range curTexts {
-		if t != "" {
-			curSet[t] = struct{}{}
-		}
-	}
-
-	// Determine the content row range (excluding TUI chrome).
-	startRow := chromeSkipFirst
-	endRow := len(oldTexts) - chromeSkipLast
-	if startRow < 0 {
-		startRow = 0
-	}
-	if endRow > len(oldTexts) {
-		endRow = len(oldTexts)
-	}
-	if startRow >= endRow {
-		return 0
-	}
-
-	// Collect old rows that disappeared.
-	type candidate struct {
-		row    int
-		glyphs scrollbackLine
-	}
-	var candidates []candidate
-	for i := startRow; i < endRow; i++ {
-		oldText := oldTexts[i]
-		if oldText == "" {
-			continue
-		}
-		// Skip agent chrome lines (spinners, status, completion).
-		if isChrome != nil && isChrome(oldText) {
-			continue
-		}
-		// Skip if the row is unchanged at the same position.
-		if i < len(curTexts) && oldText == curTexts[i] {
-			continue
-		}
-		// Skip if the row still appears anywhere on the new screen.
-		if _, exists := curSet[oldText]; exists {
-			continue
-		}
-		candidates = append(candidates, candidate{row: i, glyphs: oldGlyphs[i]})
-	}
-
-	if len(candidates) < minAltDiffRows {
-		return 0
-	}
-
-	for _, c := range candidates {
-		sb.Push(c.glyphs)
-	}
-	return len(candidates)
 }
 
 // clearTerminal deactivates the terminal widget so it shows the empty

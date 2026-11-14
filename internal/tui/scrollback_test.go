@@ -10,242 +10,11 @@ import (
 
 	"github.com/hinshun/vt10x"
 
+	"github.com/openconductorhq/openconductor/internal/config"
 	"github.com/openconductorhq/openconductor/internal/session"
 )
 
 // ── Ring buffer tests ───────────────────────────────────────────
-
-func TestScrollbackBufferPushAndLen(t *testing.T) {
-	buf := newScrollbackBuffer(5)
-
-	if buf.Len() != 0 {
-		t.Fatalf("expected empty buffer, got len=%d", buf.Len())
-	}
-
-	for i := 0; i < 3; i++ {
-		buf.Push(makeGlyphs("line %d", i))
-	}
-
-	if buf.Len() != 3 {
-		t.Fatalf("expected len=3, got %d", buf.Len())
-	}
-}
-
-func TestScrollbackBufferLineOrder(t *testing.T) {
-	buf := newScrollbackBuffer(10)
-	buf.Push(makeGlyphs("first"))
-	buf.Push(makeGlyphs("second"))
-	buf.Push(makeGlyphs("third"))
-
-	got0 := session.GlyphsText(buf.Line(0))
-	got2 := session.GlyphsText(buf.Line(2))
-
-	if got0 != "first" {
-		t.Fatalf("Line(0): expected %q, got %q", "first", got0)
-	}
-	if got2 != "third" {
-		t.Fatalf("Line(2): expected %q, got %q", "third", got2)
-	}
-}
-
-func TestScrollbackBufferWraparound(t *testing.T) {
-	buf := newScrollbackBuffer(3)
-
-	buf.Push(makeGlyphs("a"))
-	buf.Push(makeGlyphs("b"))
-	buf.Push(makeGlyphs("c"))
-	buf.Push(makeGlyphs("d")) // overwrites "a"
-	buf.Push(makeGlyphs("e")) // overwrites "b"
-
-	if buf.Len() != 3 {
-		t.Fatalf("expected len=3 after wraparound, got %d", buf.Len())
-	}
-
-	// Oldest should now be "c", newest "e".
-	oldest := session.GlyphsText(buf.Line(0))
-	newest := session.GlyphsText(buf.Line(2))
-
-	if oldest != "c" {
-		t.Fatalf("oldest: expected %q, got %q", "c", oldest)
-	}
-	if newest != "e" {
-		t.Fatalf("newest: expected %q, got %q", "e", newest)
-	}
-}
-
-func TestScrollbackBufferOutOfRange(t *testing.T) {
-	buf := newScrollbackBuffer(5)
-	buf.Push(makeGlyphs("x"))
-
-	if buf.Line(-1) != nil {
-		t.Error("Line(-1) should return nil")
-	}
-	if buf.Line(1) != nil {
-		t.Error("Line(1) should return nil for buffer with 1 element")
-	}
-}
-
-func TestDetectScrollShiftSingleLine(t *testing.T) {
-	old := []string{"line A", "line B", "line C", "line D"}
-	// After 1 line scrolled off: old[1:] shifted to new[0:]
-	new := []string{"line B", "line C", "line D", "new stuff"}
-
-	shift := detectScrollShift(old, new)
-	if shift != 1 {
-		t.Fatalf("expected shift=1, got %d", shift)
-	}
-}
-
-func TestDetectScrollShiftMultipleLines(t *testing.T) {
-	old := []string{"A", "B", "C", "D", "E", "F", "G", "H"}
-	new := []string{"C", "D", "E", "F", "G", "H", "new1", "new2"}
-
-	shift := detectScrollShift(old, new)
-	if shift != 2 {
-		t.Fatalf("expected shift=2, got %d", shift)
-	}
-}
-
-func TestDetectScrollShiftNoScroll(t *testing.T) {
-	old := []string{"A", "B", "C"}
-	new := []string{"A", "B", "C"}
-
-	shift := detectScrollShift(old, new)
-	if shift != 0 {
-		t.Fatalf("expected shift=0, got %d", shift)
-	}
-}
-
-func TestDetectScrollShiftInPlaceEdit(t *testing.T) {
-	// Content changed but didn't scroll — row 0 was modified in place.
-	old := []string{"line 1", "line 2", "line 3"}
-	new := []string{"CHANGED", "line 2", "line 3"}
-
-	shift := detectScrollShift(old, new)
-	if shift != 0 {
-		t.Fatalf("expected shift=0 for in-place edit, got %d", shift)
-	}
-}
-
-func TestDetectScrollShiftEmptyRows(t *testing.T) {
-	// Empty rows should not produce false matches.
-	old := []string{"content", "", "", ""}
-	new := []string{"", "", "", "new"}
-
-	shift := detectScrollShift(old, new)
-	// Old[1] is empty, should be skipped. No valid match.
-	if shift != 0 {
-		t.Fatalf("expected shift=0 for empty row match, got %d", shift)
-	}
-}
-
-func TestDetectScrollShiftEmpty(t *testing.T) {
-	if detectScrollShift(nil, []string{"a"}) != 0 {
-		t.Error("nil old should return 0")
-	}
-	if detectScrollShift([]string{"a"}, nil) != 0 {
-		t.Error("nil new should return 0")
-	}
-}
-
-// ── TUI full-screen redraw shift detection ──────────────────────
-
-func TestDetectScrollShiftTUIWithHeader(t *testing.T) {
-	// Simulates a TUI app (like OpenCode) that has a fixed header at row 0,
-	// a fixed footer at the last row, and content that scrolls in the middle.
-	// The header/footer DON'T shift, but the content area does.
-	old := []string{
-		"  opencode v1.0",         // row 0: header (fixed)
-		"  Response from claude:", // row 1: content
-		"  Line 1 of response",    // row 2
-		"  Line 2 of response",    // row 3
-		"  Line 3 of response",    // row 4
-		"  Line 4 of response",    // row 5
-		"  Line 5 of response",    // row 6
-		"  Line 6 of response",    // row 7
-		"  Line 7 of response",    // row 8
-		"  Line 8 of response",    // row 9
-		"  Line 9 of response",    // row 10
-		"  Line 10 of response",   // row 11
-		"",                        // row 12
-		"  > _         esc exit",  // row 13: footer (fixed)
-	}
-	new := []string{
-		"  opencode v1.0",        // row 0: header (same)
-		"  Line 1 of response",   // row 1: was row 2 (shifted up by 1)
-		"  Line 2 of response",   // row 2: was row 3
-		"  Line 3 of response",   // row 3: was row 4
-		"  Line 4 of response",   // row 4: was row 5
-		"  Line 5 of response",   // row 5: was row 6
-		"  Line 6 of response",   // row 6: was row 7
-		"  Line 7 of response",   // row 7: was row 8
-		"  Line 8 of response",   // row 8: was row 9
-		"  Line 9 of response",   // row 9: was row 10
-		"  Line 10 of response",  // row 10: was row 11
-		"  Line 11 of response",  // row 11: NEW content
-		"",                       // row 12
-		"  > _         esc exit", // row 13: footer (same)
-	}
-
-	shift := detectScrollShift(old, new)
-	if shift != 1 {
-		t.Fatalf("expected shift=1 for TUI with fixed header, got %d", shift)
-	}
-}
-
-func TestDetectScrollShiftTUIMultiLineScroll(t *testing.T) {
-	// TUI scrolls 2 lines at once (e.g., a large chunk of output arrived).
-	old := []string{
-		"  header",
-		"  Line A",
-		"  Line B",
-		"  Line C",
-		"  Line D",
-		"  Line E",
-		"  Line F",
-		"  Line G",
-		"  Line H",
-		"  footer",
-	}
-	new := []string{
-		"  header", // fixed
-		"  Line C", // was row 3 (shift=2)
-		"  Line D",
-		"  Line E",
-		"  Line F",
-		"  Line G",
-		"  Line H",
-		"  Line I", // new
-		"  Line J", // new
-		"  footer", // fixed
-	}
-
-	shift := detectScrollShift(old, new)
-	if shift != 2 {
-		t.Fatalf("expected shift=2 for TUI multi-line scroll, got %d", shift)
-	}
-}
-
-func TestDetectScrollShiftFullScreenNoScroll(t *testing.T) {
-	// TUI redraws without scrolling — same content.
-	rows := []string{
-		"  header",
-		"  Line 1",
-		"  Line 2",
-		"  Line 3",
-		"  Line 4",
-		"  Line 5",
-		"  Line 6",
-		"  footer",
-	}
-
-	shift := detectScrollShift(rows, rows)
-	if shift != 0 {
-		t.Fatalf("expected shift=0 for identical redraw, got %d", shift)
-	}
-}
-
-// ── Scroll navigation tests ────────────────────────────────────
 
 func TestScrollByClamps(t *testing.T) {
 	tm := newTerminalModel()
@@ -298,49 +67,6 @@ func TestInScrollMode(t *testing.T) {
 
 // ── Capture and write integration ───────────────────────────────
 
-func TestCaptureAndWriteDetectsScroll(t *testing.T) {
-	tm := newTerminalModel()
-	vt := vt10x.New(vt10x.WithSize(40, 5))
-	tm.vt = vt
-	tm.width = 40
-	tm.height = 5
-
-	// Fill the terminal with 5 lines.
-	for i := 0; i < 5; i++ {
-		tm.vt.Write([]byte("line " + string(rune('A'+i)) + "\r\n"))
-	}
-
-	// Now write a new line which should cause the top line to scroll off.
-	tm.captureAndWrite([]byte("new line\r\n"))
-
-	if tm.scrollback.Len() == 0 {
-		t.Fatal("expected scrollback to capture at least 1 line")
-	}
-
-	// "line A" was already destroyed by the initial vt.Write() calls (which
-	// bypass captureAndWrite). The captureAndWrite call saves "line B" —
-	// the top row at the time of the scrolling write.
-	oldest := session.GlyphsText(tm.scrollback.Line(0))
-	if !strings.HasPrefix(oldest, "line B") {
-		t.Fatalf("expected oldest scrollback to start with 'line B', got %q", oldest)
-	}
-}
-
-func TestCaptureAndWriteNoScrollNoPush(t *testing.T) {
-	tm := newTerminalModel()
-	vt := vt10x.New(vt10x.WithSize(40, 5))
-	tm.vt = vt
-	tm.width = 40
-	tm.height = 5
-
-	// Write text that fits without scrolling.
-	tm.captureAndWrite([]byte("hello"))
-
-	if tm.scrollback.Len() != 0 {
-		t.Fatalf("expected empty scrollback for non-scrolling write, got %d", tm.scrollback.Len())
-	}
-}
-
 // ── Render tests ────────────────────────────────────────────────
 
 func TestRenderGlyphRowPreservesColor(t *testing.T) {
@@ -348,7 +74,7 @@ func TestRenderGlyphRowPreservesColor(t *testing.T) {
 	tm.width = 10
 
 	// Create a glyph row with a non-default foreground.
-	glyphs := make(scrollbackLine, 10)
+	glyphs := make(session.ScrollbackLine, 10)
 	for i := range glyphs {
 		glyphs[i] = vt10x.Glyph{
 			Char: 'A',
@@ -375,7 +101,7 @@ func TestRenderGlyphRowPadsShorterLine(t *testing.T) {
 	tm.width = 20
 
 	// Create a 10-char wide glyph row — should be padded to 20.
-	glyphs := make(scrollbackLine, 10)
+	glyphs := make(session.ScrollbackLine, 10)
 	for i := range glyphs {
 		glyphs[i] = vt10x.Glyph{Char: 'X', FG: vt10x.DefaultFG, BG: vt10x.DefaultBG}
 	}
@@ -590,92 +316,6 @@ func TestViewScrollback_MixedCausesDuplication(t *testing.T) {
 
 // ── E2E: TUI-style full-screen rewrite via vt10x ────────────────
 
-func TestCaptureScrollbackTUIFullRedraw(t *testing.T) {
-	// Simulates how a Bubble Tea TUI app renders: cursor home (\x1b[H) then
-	// rewrite all rows. Content scrolls in a content area while a header and
-	// footer stay fixed. This is the OpenCode scenario the user reported.
-	tm := newTerminalModel()
-	vt := vt10x.New(vt10x.WithSize(40, 10))
-	tm.vt = vt
-	tm.width = 40
-	tm.height = 10
-
-	// Frame 1: initial render.
-	frame1 := "\x1b[H" + // cursor home
-		"  opencode v1.0                         \r\n" +
-		"  Line 1 of response                    \r\n" +
-		"  Line 2 of response                    \r\n" +
-		"  Line 3 of response                    \r\n" +
-		"  Line 4 of response                    \r\n" +
-		"  Line 5 of response                    \r\n" +
-		"  Line 6 of response                    \r\n" +
-		"  Line 7 of response                    \r\n" +
-		"                                        \r\n" +
-		"  > _                       esc exit    "
-	tm.vt.Write([]byte(frame1))
-
-	// Frame 2: content scrolls by 1, header/footer fixed.
-	frame2 := "\x1b[H" +
-		"  opencode v1.0                         \r\n" +
-		"  Line 2 of response                    \r\n" +
-		"  Line 3 of response                    \r\n" +
-		"  Line 4 of response                    \r\n" +
-		"  Line 5 of response                    \r\n" +
-		"  Line 6 of response                    \r\n" +
-		"  Line 7 of response                    \r\n" +
-		"  Line 8 of response                    \r\n" +
-		"                                        \r\n" +
-		"  > _                       esc exit    "
-
-	tm.captureAndWrite([]byte(frame2))
-
-	if tm.scrollback.Len() == 0 {
-		t.Fatal("expected scrollback to capture a line from TUI full-screen redraw")
-	}
-
-	captured := session.GlyphsText(tm.scrollback.Line(tm.scrollback.Len() - 1))
-	// The captured line should be one of the content rows that scrolled off.
-	// With shift=1, row 1 ("Line 1 of response") should be captured.
-	if !strings.Contains(captured, "Line 1") {
-		t.Fatalf("expected captured line to contain 'Line 1', got %q", captured)
-	}
-}
-
-func TestCaptureScrollbackTUI200Lines(t *testing.T) {
-	// Simulates the user's scenario: OpenCode prints 200+ lines. We send
-	// multiple full-screen redraws, each scrolling the content by 1 line.
-	tm := newTerminalModel()
-	vt := vt10x.New(vt10x.WithSize(60, 14))
-	tm.vt = vt
-	tm.width = 60
-	tm.height = 14
-
-	header := "  opencode v1.0"
-	footer := "  > _                                       esc exit"
-
-	// Render initial frame (lines 1-12).
-	renderTUIFrame(tm.vt, tm.width, header, footer, 1, 12)
-
-	// Simulate 200 lines of output, scrolling 1 line at a time.
-	capturedCount := 0
-	for startLine := 2; startLine <= 190; startLine++ {
-		frame := buildTUIFrame(tm.width, header, footer, startLine, startLine+11)
-		tm.captureAndWrite([]byte(frame))
-		if tm.scrollback.Len() > capturedCount {
-			capturedCount = tm.scrollback.Len()
-		}
-	}
-
-	// We should have captured a significant number of lines.
-	// Not all frames will trigger detection (some may fail the matching
-	// threshold), but the majority should succeed.
-	if tm.scrollback.Len() < 100 {
-		t.Fatalf("expected at least 100 scrollback lines from 189 scroll events, got %d", tm.scrollback.Len())
-	}
-
-	t.Logf("captured %d scrollback lines from 189 scroll events", tm.scrollback.Len())
-}
-
 // renderTUIFrame writes a full TUI frame directly to vt (bypasses scrollback).
 func renderTUIFrame(vt vt10x.Terminal, width int, header, footer string, startLine, endLine int) {
 	vt.Write([]byte(buildTUIFrame(width, header, footer, startLine, endLine)))
@@ -718,11 +358,11 @@ func itoa(n int) string {
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-// makeGlyphs creates a scrollbackLine from a format string with default colors.
-func makeGlyphs(format string, args ...any) scrollbackLine {
+// makeGlyphs creates a session.ScrollbackLine from a format string with default colors.
+func makeGlyphs(format string, args ...any) session.ScrollbackLine {
 	text := fmt.Sprintf(format, args...)
 
-	glyphs := make(scrollbackLine, len(text))
+	glyphs := make(session.ScrollbackLine, len(text))
 	for i, ch := range text {
 		glyphs[i] = vt10x.Glyph{
 			Char: ch,
@@ -733,9 +373,9 @@ func makeGlyphs(format string, args ...any) scrollbackLine {
 	return glyphs
 }
 
-// makeGlyphsWidth creates a scrollbackLine padded/truncated to the given width.
-func makeGlyphsWidth(text string, width int) scrollbackLine {
-	glyphs := make(scrollbackLine, width)
+// makeGlyphsWidth creates a session.ScrollbackLine padded/truncated to the given width.
+func makeGlyphsWidth(text string, width int) session.ScrollbackLine {
+	glyphs := make(session.ScrollbackLine, width)
 	for i := 0; i < width; i++ {
 		ch := ' '
 		if i < len(text) {
@@ -751,393 +391,6 @@ func makeGlyphsWidth(text string, width int) scrollbackLine {
 }
 
 // ── Alt-screen diff capture tests ───────────────────────────────
-
-func TestPushAltScreenDiff_BasicCapture(t *testing.T) {
-	// Simulate a TUI app full-screen repaint where content rows disappear.
-	sb := newScrollbackBuffer(100)
-
-	oldTexts := []string{
-		"header", // row 0 — stays
-		"old content line1",
-		"old content line2",
-		"old content line3",
-		"old content line4",
-		"footer", // row 5 — stays
-	}
-	oldGlyphs := make([]scrollbackLine, len(oldTexts))
-	for i, t := range oldTexts {
-		oldGlyphs[i] = makeGlyphs("%s", t)
-	}
-
-	curTexts := []string{
-		"header", // same as old
-		"new content line1",
-		"new content line2",
-		"new content line3",
-		"new content line4",
-		"footer", // same as old
-	}
-
-	pushed := pushAltScreenDiff(sb, oldTexts, oldGlyphs, curTexts, 0, 0, nil)
-
-	// 4 old content rows disappeared (not in curTexts, not at same position).
-	if pushed != 4 {
-		t.Fatalf("expected 4 pushed rows, got %d", pushed)
-	}
-	if sb.Len() != 4 {
-		t.Fatalf("expected scrollback len=4, got %d", sb.Len())
-	}
-
-	// Verify correct content was captured.
-	for i := 0; i < 4; i++ {
-		got := session.GlyphsText(sb.Line(i))
-		expected := fmt.Sprintf("old content line%d", i+1)
-		if got != expected {
-			t.Errorf("line %d: got %q, want %q", i, got, expected)
-		}
-	}
-}
-
-func TestPushAltScreenDiff_SkipSmallDiff(t *testing.T) {
-	// Only 2 rows changed — below minAltDiffRows threshold.
-	sb := newScrollbackBuffer(100)
-
-	oldTexts := []string{
-		"header",
-		"old content 1",
-		"old content 2",
-		"same row",
-		"footer",
-	}
-	oldGlyphs := make([]scrollbackLine, len(oldTexts))
-	for i, t := range oldTexts {
-		oldGlyphs[i] = makeGlyphs("%s", t)
-	}
-
-	curTexts := []string{
-		"header",
-		"new content 1",
-		"new content 2",
-		"same row",
-		"footer",
-	}
-
-	pushed := pushAltScreenDiff(sb, oldTexts, oldGlyphs, curTexts, 0, 0, nil)
-
-	// Only 2 rows changed — below threshold of 3, so nothing pushed.
-	if pushed != 0 {
-		t.Fatalf("expected 0 pushed (below threshold), got %d", pushed)
-	}
-}
-
-func TestPushAltScreenDiff_SkipRowsPresentElsewhere(t *testing.T) {
-	// An old row that moved to a different position should NOT be pushed.
-	sb := newScrollbackBuffer(100)
-
-	oldTexts := []string{
-		"header",
-		"content A",
-		"content B",
-		"content C",
-		"content D",
-		"content E",
-		"footer",
-	}
-	oldGlyphs := make([]scrollbackLine, len(oldTexts))
-	for i, t := range oldTexts {
-		oldGlyphs[i] = makeGlyphs("%s", t)
-	}
-
-	curTexts := []string{
-		"header",
-		"content B", // moved up from row 2 to row 1
-		"content C", // moved up from row 3 to row 2
-		"content D", // moved up
-		"content E", // moved up
-		"content F", // new
-		"footer",
-	}
-
-	pushed := pushAltScreenDiff(sb, oldTexts, oldGlyphs, curTexts, 0, 0, nil)
-
-	// Only "content A" truly disappeared (not anywhere in curTexts).
-	// That's 1 row — below minAltDiffRows, so nothing pushed.
-	if pushed != 0 {
-		t.Fatalf("expected 0 pushed (only 1 unique disappeared row), got %d", pushed)
-	}
-}
-
-func TestPushAltScreenDiff_BlankRowsIgnored(t *testing.T) {
-	sb := newScrollbackBuffer(100)
-
-	oldTexts := []string{
-		"header",
-		"", // blank — should be skipped
-		"old line 1",
-		"old line 2",
-		"old line 3",
-		"", // blank
-		"footer",
-	}
-	oldGlyphs := make([]scrollbackLine, len(oldTexts))
-	for i, t := range oldTexts {
-		oldGlyphs[i] = makeGlyphs("%s", t)
-	}
-
-	curTexts := []string{
-		"header",
-		"",
-		"new line 1",
-		"new line 2",
-		"new line 3",
-		"",
-		"footer",
-	}
-
-	pushed := pushAltScreenDiff(sb, oldTexts, oldGlyphs, curTexts, 0, 0, nil)
-
-	// 3 old content rows disappeared (blank rows skipped).
-	if pushed != 3 {
-		t.Fatalf("expected 3 pushed rows, got %d", pushed)
-	}
-}
-
-// ── Dedup tests ─────────────────────────────────────────────────
-
-func TestScrollbackDedup_SkipsDuplicates(t *testing.T) {
-	buf := newScrollbackBuffer(100)
-
-	buf.Push(makeGlyphs("hello world"))
-	buf.Push(makeGlyphs("hello world")) // duplicate — should be skipped
-	buf.Push(makeGlyphs("hello world")) // duplicate — should be skipped
-
-	if buf.Len() != 1 {
-		t.Fatalf("expected len=1 after dedup, got %d", buf.Len())
-	}
-
-	got := session.GlyphsText(buf.Line(0))
-	if got != "hello world" {
-		t.Fatalf("expected %q, got %q", "hello world", got)
-	}
-}
-
-func TestScrollbackDedup_AllowsUniqueContent(t *testing.T) {
-	buf := newScrollbackBuffer(100)
-
-	buf.Push(makeGlyphs("line A"))
-	buf.Push(makeGlyphs("line B"))
-	buf.Push(makeGlyphs("line C"))
-
-	if buf.Len() != 3 {
-		t.Fatalf("expected len=3, got %d", buf.Len())
-	}
-}
-
-func TestScrollbackDedup_BlankLinesBypassDedup(t *testing.T) {
-	buf := newScrollbackBuffer(100)
-
-	// Blank lines (empty after trim) should always be pushed (not deduped).
-	buf.Push(makeGlyphs(""))
-	buf.Push(makeGlyphs(""))
-	buf.Push(makeGlyphs(""))
-
-	if buf.Len() != 3 {
-		t.Fatalf("expected len=3 for blank lines, got %d", buf.Len())
-	}
-}
-
-func TestScrollbackDedup_BufferEvictsOnWraparound(t *testing.T) {
-	// With buffer-wide dedup, a line can only be re-pushed after it is
-	// evicted from the ring buffer (i.e. overwritten by wraparound).
-	buf := newScrollbackBuffer(5)
-
-	buf.Push(makeGlyphs("original line"))
-	if buf.Len() != 1 {
-		t.Fatalf("expected len=1, got %d", buf.Len())
-	}
-
-	// "original line" is still in the buffer — re-push should be rejected.
-	buf.Push(makeGlyphs("original line"))
-	if buf.Len() != 1 {
-		t.Fatalf("expected len=1 (dedup), got %d", buf.Len())
-	}
-
-	// Fill the buffer to capacity to evict "original line" via wraparound.
-	buf.Push(makeGlyphs("filler 1"))
-	buf.Push(makeGlyphs("filler 2"))
-	buf.Push(makeGlyphs("filler 3"))
-	buf.Push(makeGlyphs("filler 4")) // buffer full (cap=5)
-	buf.Push(makeGlyphs("filler 5")) // overwrites "original line"
-
-	if buf.Len() != 5 {
-		t.Fatalf("expected len=5, got %d", buf.Len())
-	}
-
-	// Now "original line" has been evicted — re-push should succeed.
-	buf.Push(makeGlyphs("original line"))
-	newest := session.GlyphsText(buf.Line(buf.Len() - 1))
-	if newest != "original line" {
-		t.Fatalf("expected newest line to be %q after re-push, got %q", "original line", newest)
-	}
-}
-
-func TestScrollbackDedup_NoEvictionWhileInBuffer(t *testing.T) {
-	// Verify that a line cannot be re-pushed as long as it remains in the buffer,
-	// even after many other unique lines have been pushed.
-	buf := newScrollbackBuffer(100)
-
-	buf.Push(makeGlyphs("persistent line"))
-
-	// Push 50 unique lines — "persistent line" is still in the buffer.
-	for i := 0; i < 50; i++ {
-		buf.Push(makeGlyphs("other line %d", i))
-	}
-
-	beforeLen := buf.Len()
-	buf.Push(makeGlyphs("persistent line")) // should be rejected — still in buffer
-	if buf.Len() != beforeLen {
-		t.Fatalf("expected len=%d (dedup), got %d", beforeLen, buf.Len())
-	}
-}
-
-func TestScrollbackDedup_DuplicateNotCountedInLen(t *testing.T) {
-	buf := newScrollbackBuffer(100)
-
-	buf.Push(makeGlyphs("same content"))
-	buf.Push(makeGlyphs("same content"))
-	buf.Push(makeGlyphs("different content"))
-	buf.Push(makeGlyphs("same content")) // still in dedup window
-
-	if buf.Len() != 2 {
-		t.Fatalf("expected len=2 (1 same + 1 different), got %d", buf.Len())
-	}
-}
-
-// ── Chrome skipping tests ───────────────────────────────────────
-
-func TestPushAltScreenDiff_ChromeSkipping(t *testing.T) {
-	// With chrome skipping, header (row 0) and last 2 rows (status + footer)
-	// should be excluded from candidates even if they changed.
-	sb := newScrollbackBuffer(100)
-
-	oldTexts := []string{
-		"header v1.0",                        // row 0: header — skip
-		"old content line1",                  // row 1: content
-		"old content line2",                  // row 2: content
-		"old content line3",                  // row 3: content
-		"old content line4",                  // row 4: content
-		"old content line5",                  // row 5: content
-		"Build · claude-opus-4-6 · 5m 21s",   // row 6: status bar — skip
-		"  > _                     esc exit", // row 7: footer — skip
-	}
-	oldGlyphs := make([]scrollbackLine, len(oldTexts))
-	for i, txt := range oldTexts {
-		oldGlyphs[i] = makeGlyphs("%s", txt)
-	}
-
-	curTexts := []string{
-		"header v1.0",       // same header
-		"new content line1", // all content changed
-		"new content line2",
-		"new content line3",
-		"new content line4",
-		"new content line5",
-		"Build · claude-opus-4-6 · 5m 22s",   // status bar changed (timer tick)
-		"  > _                     esc exit", // footer same
-	}
-
-	// With chromeSkipFirst=1, chromeSkipLast=2: skip row 0 and rows 6-7.
-	// Only rows 1-5 are candidates. All 5 old content rows disappeared.
-	pushed := pushAltScreenDiff(sb, oldTexts, oldGlyphs, curTexts, 1, 2, nil)
-
-	if pushed != 5 {
-		t.Fatalf("expected 5 pushed rows with chrome skipping, got %d", pushed)
-	}
-	if sb.Len() != 5 {
-		t.Fatalf("expected scrollback len=5, got %d", sb.Len())
-	}
-
-	// Verify the status bar row was NOT pushed.
-	for i := 0; i < sb.Len(); i++ {
-		line := session.GlyphsText(sb.Line(i))
-		if strings.Contains(line, "Build") {
-			t.Errorf("status bar row should not be in scrollback, found at index %d: %q", i, line)
-		}
-	}
-}
-
-func TestPushAltScreenDiff_ChromeSkipLargerThanScreen(t *testing.T) {
-	// Edge case: skip values larger than screen height should not panic.
-	sb := newScrollbackBuffer(100)
-
-	oldTexts := []string{"only row"}
-	oldGlyphs := []scrollbackLine{makeGlyphs("only row")}
-	curTexts := []string{"changed"}
-
-	pushed := pushAltScreenDiff(sb, oldTexts, oldGlyphs, curTexts, 5, 5, nil)
-	if pushed != 0 {
-		t.Fatalf("expected 0 pushed for oversized skip, got %d", pushed)
-	}
-}
-
-// ── textToGlyphs tests ─────────────────────────────────────────
-
-func TestTextToGlyphs_BasicString(t *testing.T) {
-	glyphs := textToGlyphs("hello")
-	if len(glyphs) != 5 {
-		t.Fatalf("expected 5 glyphs, got %d", len(glyphs))
-	}
-	got := session.GlyphsText(glyphs)
-	if got != "hello" {
-		t.Errorf("round-trip: expected %q, got %q", "hello", got)
-	}
-}
-
-func TestTextToGlyphs_EmptyString(t *testing.T) {
-	glyphs := textToGlyphs("")
-	if len(glyphs) != 0 {
-		t.Fatalf("expected 0 glyphs for empty string, got %d", len(glyphs))
-	}
-}
-
-func TestTextToGlyphs_Unicode(t *testing.T) {
-	glyphs := textToGlyphs("── You ──")
-	got := session.GlyphsText(glyphs)
-	if got != "── You ──" {
-		t.Errorf("expected %q, got %q", "── You ──", got)
-	}
-}
-
-func TestTextToGlyphs_PushedToScrollback(t *testing.T) {
-	// Verify that textToGlyphs output works with the scrollback buffer.
-	buf := newScrollbackBuffer(100)
-	lines := []string{
-		"── You ──────────────",
-		"Fix the login bug",
-		"",
-		"── Assistant ─────────",
-		"I'll help you fix it.",
-	}
-	for _, line := range lines {
-		buf.Push(textToGlyphs(line))
-	}
-
-	if buf.Len() != 5 {
-		t.Fatalf("expected 5 lines in scrollback, got %d", buf.Len())
-	}
-
-	got := session.GlyphsText(buf.Line(0))
-	if !strings.HasPrefix(got, "── You") {
-		t.Errorf("first line should be You header, got %q", got)
-	}
-
-	got = session.GlyphsText(buf.Line(1))
-	if got != "Fix the login bug" {
-		t.Errorf("second line: expected %q, got %q", "Fix the login bug", got)
-	}
-}
-
-// ── E2E: alt-screen scroll-up duplication test ──────────────────
 
 // TestAltScreenScrollNoDuplication is the key test for the scroll duplication
 // bug. It simulates the full app-level flow:
@@ -1157,12 +410,13 @@ func TestAltScreenScrollNoDuplication(t *testing.T) {
 
 	// Set up terminal model with vt10x and scrollback.
 	tm := newTerminalModel()
-	vt := vt10x.New(vt10x.WithSize(width, height))
+	s := newAltScreenSession(width, height)
+	vt := s.VT
 	tm.vt = vt
 	tm.width = width
 	tm.height = height
 	tm.altScreen = true
-	tm.scrollback = newScrollbackBuffer(1000)
+	tm.scrollback = s.Scrollback()
 
 	header := "  opencode v1.0"
 	statusBar := "  Build · claude-opus-4-6 · 5m 21s"
@@ -1173,10 +427,6 @@ func TestAltScreenScrollNoDuplication(t *testing.T) {
 	// In the real app, 100ms of output scrolls content by several lines at once.
 	contentRows := height - chromeTop - chromeBottom // 11 content rows
 
-	// Track snapshots for pushAltScreenDiff (simulates checkScrollback).
-	var prevTexts []string
-	var prevGlyphs []scrollbackLine
-
 	scrollPerFrame := 5
 	for frame := 0; frame < 50; frame++ {
 		frameStart := 1 + frame*scrollPerFrame
@@ -1185,24 +435,7 @@ func TestAltScreenScrollNoDuplication(t *testing.T) {
 		vt.Write([]byte(frameData))
 
 		// Snapshot current screen.
-		curTexts := make([]string, height)
-		curGlyphs := make([]scrollbackLine, height)
-		for row := 0; row < height; row++ {
-			glyphs := make(scrollbackLine, width)
-			for col := 0; col < width; col++ {
-				glyphs[col] = vt.Cell(col, row)
-			}
-			curGlyphs[row] = glyphs
-			curTexts[row] = session.GlyphsText(glyphs)
-		}
-
-		// Run the same diff logic as checkScrollback for alt-screen.
-		if prevTexts != nil {
-			pushAltScreenDiff(tm.scrollback, prevTexts, prevGlyphs, curTexts, chromeTop, chromeBottom, nil)
-		}
-
-		prevTexts = curTexts
-		prevGlyphs = curGlyphs
+		s.CheckScrollback()
 	}
 
 	t.Logf("scrollback has %d lines after 50 frames", tm.scrollback.Len())
@@ -1214,7 +447,7 @@ func TestAltScreenScrollNoDuplication(t *testing.T) {
 	// --- Phase 2: Get the live viewport text ---
 	liveLines := make(map[string]bool)
 	for row := 0; row < height; row++ {
-		text := tm.viewportRowText(row)
+		text := session.RowText(tm.vt, row, tm.width)
 		if text != "" {
 			liveLines[text] = true
 		}
@@ -1292,7 +525,7 @@ func TestAltScreenScrollSmallBuffer(t *testing.T) {
 	tm.width = width
 	tm.height = height
 	tm.altScreen = true
-	tm.scrollback = newScrollbackBuffer(100)
+	tm.scrollback = session.NewScrollback(100)
 
 	// Only push 3 lines to scrollback (less than height).
 	tm.scrollback.Push(makeGlyphsWidth("Line A", width))
@@ -1327,20 +560,19 @@ func TestAltScreenScrollHalfPageNoDuplication(t *testing.T) {
 	const chromeBottom = 2
 
 	tm := newTerminalModel()
-	vt := vt10x.New(vt10x.WithSize(width, height))
+	s := newAltScreenSession(width, height)
+	vt := s.VT
 	tm.vt = vt
 	tm.width = width
 	tm.height = height
 	tm.altScreen = true
-	tm.scrollback = newScrollbackBuffer(1000)
+	tm.scrollback = s.Scrollback()
 
 	header := "  opencode v1.0"
 	statusBar := "  Build · claude-opus-4-6 · 5m 21s"
 	footer := "  > _                                       esc exit"
 
 	// Simulate 100 frames of TUI output, scrolling 5 lines per frame.
-	var prevTexts []string
-	var prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop - chromeBottom // 17 content rows
 	scrollPerFrame := 5
 
@@ -1349,22 +581,7 @@ func TestAltScreenScrollHalfPageNoDuplication(t *testing.T) {
 		frameData := buildTUIFrameWithChrome(width, header, statusBar, footer, frameStart, frameStart+contentRows-1)
 		vt.Write([]byte(frameData))
 
-		curTexts := make([]string, height)
-		curGlyphs := make([]scrollbackLine, height)
-		for row := 0; row < height; row++ {
-			glyphs := make(scrollbackLine, width)
-			for col := 0; col < width; col++ {
-				glyphs[col] = vt.Cell(col, row)
-			}
-			curGlyphs[row] = glyphs
-			curTexts[row] = session.GlyphsText(glyphs)
-		}
-
-		if prevTexts != nil {
-			pushAltScreenDiff(tm.scrollback, prevTexts, prevGlyphs, curTexts, chromeTop, chromeBottom, nil)
-		}
-		prevTexts = curTexts
-		prevGlyphs = curGlyphs
+		s.CheckScrollback()
 	}
 
 	t.Logf("scrollback has %d lines after 100 frames", tm.scrollback.Len())
@@ -1372,7 +589,7 @@ func TestAltScreenScrollHalfPageNoDuplication(t *testing.T) {
 	// Get live viewport.
 	liveLines := make(map[string]bool)
 	for row := 0; row < height; row++ {
-		text := tm.viewportRowText(row)
+		text := session.RowText(tm.vt, row, tm.width)
 		if text != "" {
 			liveLines[text] = true
 		}
@@ -1441,21 +658,18 @@ func TestAltScreenTraditionalScrollPathNoDuplication(t *testing.T) {
 	const chromeBottom = 2
 
 	tm := newTerminalModel()
-	vt := vt10x.New(vt10x.WithSize(width, height))
+	s := newAltScreenSession(width, height)
+	vt := s.VT
 	tm.vt = vt
 	tm.width = width
 	tm.height = height
 	tm.altScreen = true
-	tm.scrollback = newScrollbackBuffer(1000)
+	tm.scrollback = s.Scrollback()
 
 	header := "  opencode v1.0"
 	statusBar := "  Build · claude-opus-4-6 · 5m 21s"
 	footer := "  > _                                       esc exit"
 	contentRows := height - chromeTop - chromeBottom // 11
-
-	// Track snapshots like checkScrollback does.
-	var prevTexts []string
-	var prevGlyphs []scrollbackLine
 
 	scrollPerFrame := 3 // enough for shift detection but less than content rows
 
@@ -1464,44 +678,7 @@ func TestAltScreenTraditionalScrollPathNoDuplication(t *testing.T) {
 		frameData := buildTUIFrameWithChrome(width, header, statusBar, footer, frameStart, frameStart+contentRows-1)
 		vt.Write([]byte(frameData))
 
-		curTexts := make([]string, height)
-		curGlyphs := make([]scrollbackLine, height)
-		for row := 0; row < height; row++ {
-			glyphs := make(scrollbackLine, width)
-			for col := 0; col < width; col++ {
-				glyphs[col] = vt.Cell(col, row)
-			}
-			curGlyphs[row] = glyphs
-			curTexts[row] = session.GlyphsText(glyphs)
-		}
-
-		if prevTexts != nil {
-			// Use the EXACT same logic as checkScrollback.
-			shift := detectScrollShift(prevTexts, curTexts)
-			if shift > 0 {
-				firstDiff := 0
-				for firstDiff < len(prevTexts) && firstDiff < len(curTexts) && prevTexts[firstDiff] == curTexts[firstDiff] {
-					firstDiff++
-				}
-				end := firstDiff + shift
-				if end > len(prevGlyphs) {
-					end = len(prevGlyphs)
-				}
-				for i := firstDiff; i < end; i++ {
-					tm.scrollback.Push(prevGlyphs[i])
-				}
-				t.Logf("frame %d: shift=%d, pushed rows %d-%d", frame, shift, firstDiff, end-1)
-			} else {
-				// Alt-screen diff fallback.
-				pushed := pushAltScreenDiff(tm.scrollback, prevTexts, prevGlyphs, curTexts, chromeTop, chromeBottom, nil)
-				if pushed > 0 {
-					t.Logf("frame %d: pushAltScreenDiff pushed %d", frame, pushed)
-				}
-			}
-		}
-
-		prevTexts = curTexts
-		prevGlyphs = curGlyphs
+		s.CheckScrollback()
 	}
 
 	t.Logf("scrollback has %d lines after 60 frames", tm.scrollback.Len())
@@ -1509,7 +686,7 @@ func TestAltScreenTraditionalScrollPathNoDuplication(t *testing.T) {
 	// Get live viewport text.
 	liveLines := make(map[string]bool)
 	for row := 0; row < height; row++ {
-		text := tm.viewportRowText(row)
+		text := session.RowText(tm.vt, row, tm.width)
 		if text != "" {
 			liveLines[text] = true
 		}
@@ -1561,23 +738,20 @@ func TestAltScreenScrollMixedCapturePaths(t *testing.T) {
 	const chromeBottom = 2
 
 	tm := newTerminalModel()
-	vt := vt10x.New(vt10x.WithSize(width, height))
+	s := newAltScreenSession(width, height)
+	vt := s.VT
 	tm.vt = vt
 	tm.width = width
 	tm.height = height
 	tm.altScreen = true
-	tm.scrollback = newScrollbackBuffer(1000)
+	tm.scrollback = s.Scrollback()
 
 	header := "  opencode v1.0"
 	statusBar := "  Build · claude-opus-4-6 · 5m 21s"
 	footer := "  > _                                       esc exit"
 	contentRows := height - chromeTop - chromeBottom // 11
 
-	var prevTexts []string
-	var prevGlyphs []scrollbackLine
-
-	shiftCaptures := 0
-	diffCaptures := 0
+	captures := 0
 	currentLine := 1
 
 	for frame := 0; frame < 80; frame++ {
@@ -1594,51 +768,17 @@ func TestAltScreenScrollMixedCapturePaths(t *testing.T) {
 		frameData := buildTUIFrameWithChrome(width, header, statusBar, footer, currentLine, currentLine+contentRows-1)
 		vt.Write([]byte(frameData))
 
-		curTexts := make([]string, height)
-		curGlyphs := make([]scrollbackLine, height)
-		for row := 0; row < height; row++ {
-			glyphs := make(scrollbackLine, width)
-			for col := 0; col < width; col++ {
-				glyphs[col] = vt.Cell(col, row)
-			}
-			curGlyphs[row] = glyphs
-			curTexts[row] = session.GlyphsText(glyphs)
+		if s.CheckScrollback() > 0 {
+			captures++
 		}
-
-		if prevTexts != nil {
-			shift := detectScrollShift(prevTexts, curTexts)
-			if shift > 0 {
-				firstDiff := 0
-				for firstDiff < len(prevTexts) && firstDiff < len(curTexts) && prevTexts[firstDiff] == curTexts[firstDiff] {
-					firstDiff++
-				}
-				end := firstDiff + shift
-				if end > len(prevGlyphs) {
-					end = len(prevGlyphs)
-				}
-				for i := firstDiff; i < end; i++ {
-					tm.scrollback.Push(prevGlyphs[i])
-				}
-				shiftCaptures++
-			} else {
-				pushed := pushAltScreenDiff(tm.scrollback, prevTexts, prevGlyphs, curTexts, chromeTop, chromeBottom, nil)
-				if pushed > 0 {
-					diffCaptures++
-				}
-			}
-		}
-
-		prevTexts = curTexts
-		prevGlyphs = curGlyphs
 	}
 
-	t.Logf("scrollback: %d lines, shift captures: %d, diff captures: %d",
-		tm.scrollback.Len(), shiftCaptures, diffCaptures)
+	t.Logf("scrollback: %d lines, frames with captures: %d", tm.scrollback.Len(), captures)
 
 	// Get live viewport.
 	liveLines := make(map[string]bool)
 	for row := 0; row < height; row++ {
-		text := tm.viewportRowText(row)
+		text := session.RowText(tm.vt, row, tm.width)
 		if text != "" {
 			liveLines[text] = true
 		}
@@ -1902,5 +1042,19 @@ func TestClearSelection(t *testing.T) {
 	}
 	if tm.IsSelected(5, 1) {
 		t.Error("expected (5, 1) to NOT be selected after ClearSelection")
+	}
+}
+
+// newAltScreenSession returns an OpenCode-like session whose VT is in
+// alt-screen mode, for driving Session.CheckScrollback.
+func newAltScreenSession(width, height int) *session.Session {
+	vt := vt10x.New(vt10x.WithSize(width, height))
+	vt.Write([]byte("\x1b[?1049h"))
+	return &session.Session{
+		ID:      "alt",
+		VT:      vt,
+		Width:   width,
+		Height:  height,
+		Project: config.Project{Agent: config.AgentOpenCode},
 	}
 }

@@ -48,8 +48,14 @@ type Session struct {
 	outputFilter func([]byte) []byte
 
 	// scrollCapture collects lines that scroll off the top of the vt10x
-	// grid during VT.Write(). The App's checkScrollback() drains these.
+	// grid during VT.Write(). CheckScrollback drains these.
 	scrollCapture []ScrollCapturedLine
+
+	// scrollback holds rows that left the screen; snapTexts/snapGlyphs are
+	// the screen at the last CheckScrollback, for snapshot-based detection.
+	scrollback *Scrollback
+	snapTexts  []string
+	snapGlyphs []ScrollbackLine
 
 	Mu            sync.RWMutex
 	Width, Height int
@@ -412,12 +418,9 @@ func scrollShift(pre, post []string) int {
 	return gone
 }
 
-// DrainScrollCapture returns and clears all lines captured during VT.Write()
-// scroll-off events. Called by the App's checkScrollback() to push these
-// lines into the scrollback buffer.
-//
-// Must be called with s.Mu held (at least read lock).
-func (s *Session) DrainScrollCapture() []ScrollCapturedLine {
+// drainScrollCapture returns and clears all lines captured during VT.Write()
+// scroll-off events. Called by CheckScrollback with s.Mu held for writing.
+func (s *Session) drainScrollCapture() []ScrollCapturedLine {
 	if len(s.scrollCapture) == 0 {
 		return nil
 	}

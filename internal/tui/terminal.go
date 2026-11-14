@@ -39,7 +39,7 @@ type terminalModel struct {
 	// Scrollback state. The buffer captures glyph rows as they scroll off
 	// the top of the vt10x viewport. scrollOffset tracks how many lines
 	// the user has scrolled up from the live view (0 = live).
-	scrollback   *scrollbackBuffer
+	scrollback   *session.Scrollback
 	scrollOffset int
 
 	// scrollPinned is true when the user has scrolled up into history and
@@ -72,7 +72,7 @@ func newTerminalModel() terminalModel {
 		mu:         &sync.RWMutex{},
 		focused:    true,
 		active:     false,
-		scrollback: newScrollbackBuffer(defaultScrollbackCapacity),
+		scrollback: session.NewScrollback(0),
 	}
 }
 
@@ -698,75 +698,6 @@ func colorSGR(c vt10x.Color, fg bool) string {
 		return "38;2;" + strconv.Itoa(int(r)) + ";" + strconv.Itoa(int(g)) + ";" + strconv.Itoa(int(b))
 	}
 	return "48;2;" + strconv.Itoa(int(r)) + ";" + strconv.Itoa(int(g)) + ";" + strconv.Itoa(int(b))
-}
-
-// ── Scrollback capture ──────────────────────────────────────────
-
-// captureAndWrite snapshots the current viewport, writes data to vt10x,
-// then detects how many lines scrolled off and pushes them to the
-// scrollback buffer. Must be called with mu held.
-func (m *terminalModel) captureAndWrite(data []byte) {
-	if m.vt == nil {
-		return
-	}
-
-	// Snapshot all rows as glyph slices + text before the write.
-	oldGlyphs := m.snapshotGlyphs()
-	oldTexts := make([]string, len(oldGlyphs))
-	for i, row := range oldGlyphs {
-		oldTexts[i] = session.GlyphsText(row)
-	}
-
-	// Write to vt10x — this may destroy the top rows via scrollUp().
-	m.vt.Write(data)
-
-	// Build new text snapshot for shift detection.
-	newTexts := make([]string, m.height)
-	for row := 0; row < m.height; row++ {
-		newTexts[row] = m.viewportRowText(row)
-	}
-
-	// Detect how many lines scrolled off the top.
-	shift := detectScrollShift(oldTexts, newTexts)
-
-	if shift > 0 {
-		// Find where the shifted region starts. In a normal terminal scroll,
-		// this is row 0. In a TUI with a fixed header, the top rows may be
-		// identical (header), and the actual shift starts further down.
-		firstDiff := 0
-		for firstDiff < len(oldTexts) && firstDiff < len(newTexts) && oldTexts[firstDiff] == newTexts[firstDiff] {
-			firstDiff++
-		}
-
-		// Push the scrolled-off rows from old[firstDiff..firstDiff+shift-1].
-		end := firstDiff + shift
-		if end > len(oldGlyphs) {
-			end = len(oldGlyphs)
-		}
-		for i := firstDiff; i < end; i++ {
-			m.scrollback.Push(oldGlyphs[i])
-		}
-	}
-}
-
-// snapshotGlyphs copies every cell from the current vt10x viewport into
-// freshly allocated glyph slices. Must be called with mu held.
-func (m *terminalModel) snapshotGlyphs() []scrollbackLine {
-	rows := make([]scrollbackLine, m.height)
-	for row := 0; row < m.height; row++ {
-		glyphs := make(scrollbackLine, m.width)
-		for col := 0; col < m.width; col++ {
-			glyphs[col] = m.vt.Cell(col, row)
-		}
-		rows[row] = glyphs
-	}
-	return rows
-}
-
-// viewportRowText returns the text content of a single viewport row,
-// trimmed of trailing spaces. Must be called with mu held.
-func (m *terminalModel) viewportRowText(row int) string {
-	return session.RowText(m.vt, row, m.width)
 }
 
 // ── Scroll navigation ───────────────────────────────────────────

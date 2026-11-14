@@ -1158,7 +1158,7 @@ func TestScrollbackE2EOpenCodeScenario(t *testing.T) {
 		app.runScrollCheck()
 	}
 
-	capturedLines := app.scrollbacks["stocks"].Len()
+	capturedLines := app.mgr.GetSession("stocks").Scrollback().Len()
 	t.Logf("captured %d scrollback lines from %d scroll events", capturedLines, totalLines-contentRows)
 
 	// Should have captured a substantial portion. Each scroll-check sees
@@ -1168,7 +1168,7 @@ func TestScrollbackE2EOpenCodeScenario(t *testing.T) {
 	}
 
 	// Verify the earliest captured line contains the expected content.
-	oldest := session.GlyphsText(app.scrollbacks["stocks"].Line(0))
+	oldest := session.GlyphsText(app.mgr.GetSession("stocks").Scrollback().Line(0))
 	if !strings.Contains(oldest, "Line") {
 		t.Fatalf("expected oldest scrollback line to contain 'Line', got %q", oldest)
 	}
@@ -1219,7 +1219,7 @@ func TestScrollbackE2EOpenCodeScenario(t *testing.T) {
 	}
 
 	// ── Step 4: Agent prints 30 more lines ───────────────────────
-	prevCaptured := app.scrollbacks["stocks"].Len()
+	prevCaptured := app.mgr.GetSession("stocks").Scrollback().Len()
 	base := totalLines - contentRows + 2
 	for startLine := base; startLine < base+30; startLine++ {
 		endLine := startLine + contentRows - 1
@@ -1227,7 +1227,7 @@ func TestScrollbackE2EOpenCodeScenario(t *testing.T) {
 		app.runScrollCheck()
 	}
 
-	newCaptured := app.scrollbacks["stocks"].Len()
+	newCaptured := app.mgr.GetSession("stocks").Scrollback().Len()
 	added := newCaptured - prevCaptured
 	t.Logf("captured %d more scrollback lines from 30 additional scroll events", added)
 
