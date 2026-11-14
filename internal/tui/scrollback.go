@@ -141,16 +141,6 @@ func (b *scrollbackBuffer) Line(i int) scrollbackLine {
 	return b.lines[(b.start+i)%b.cap]
 }
 
-// Clear discards all stored lines and resets the dedup set.
-func (b *scrollbackBuffer) Clear() {
-	b.start = 0
-	b.len = 0
-	b.textSet = make(map[string]int, b.cap)
-	for i := range b.lineTexts {
-		b.lineTexts[i] = ""
-	}
-}
-
 // ── Scroll shift detection ──────────────────────────────────────
 
 // detectScrollShift compares row text content before and after a vt10x Write

@@ -61,27 +61,12 @@ Production-grade engineering with comprehensive quality.
 - Refactor proactively when you see code smells`,
 }
 
-// InstructionText returns the markdown instruction block for a built-in
-// persona. Returns an empty string for unknown or None personas.
-func InstructionText(persona config.PersonaType) string {
-	return instructionText[persona]
-}
-
 // defaultApproval maps each persona type to its suggested auto-approval level.
 var defaultApproval = map[config.PersonaType]config.ApprovalLevel{
 	config.PersonaNone:  config.ApprovalOff,
 	config.PersonaVibe:  config.ApprovalFull,
 	config.PersonaPOC:   config.ApprovalSafe,
 	config.PersonaScale: config.ApprovalOff,
-}
-
-// DefaultApproval returns the suggested auto-approval level for the given
-// persona. Returns ApprovalOff for unknown personas.
-func DefaultApproval(persona config.PersonaType) config.ApprovalLevel {
-	if level, ok := defaultApproval[persona]; ok {
-		return level
-	}
-	return config.ApprovalOff
 }
 
 // builtinLabels maps built-in persona types to their human-readable labels.

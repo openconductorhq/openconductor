@@ -83,19 +83,6 @@ func TestScrollbackBufferOutOfRange(t *testing.T) {
 	}
 }
 
-func TestScrollbackBufferClear(t *testing.T) {
-	buf := newScrollbackBuffer(5)
-	buf.Push(makeGlyphs("a"))
-	buf.Push(makeGlyphs("b"))
-	buf.Clear()
-
-	if buf.Len() != 0 {
-		t.Fatalf("expected len=0 after clear, got %d", buf.Len())
-	}
-}
-
-// ── Shift detection tests ───────────────────────────────────────
-
 func TestDetectScrollShiftSingleLine(t *testing.T) {
 	old := []string{"line A", "line B", "line C", "line D"}
 	// After 1 line scrolled off: old[1:] shifted to new[0:]

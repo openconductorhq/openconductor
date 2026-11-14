@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/openconductorhq/openconductor/internal/config"
+	"github.com/openconductorhq/openconductor/internal/fsutil"
 	"github.com/openconductorhq/openconductor/internal/logging"
 )
 
@@ -275,7 +276,7 @@ func writeSkills(repoPath string, persona config.PersonaType) error {
 			return fmt.Errorf("creating skill dir %s: %w", skill.Name, err)
 		}
 		skillFile := filepath.Join(dir, "SKILL.md")
-		if err := atomicWrite(skillFile, []byte(skill.Content), 0o644); err != nil {
+		if err := fsutil.AtomicWrite(skillFile, []byte(skill.Content), 0o644); err != nil {
 			return fmt.Errorf("writing skill %s: %w", skill.Name, err)
 		}
 		logging.Info("persona: wrote skill", "skill", skill.Name)
@@ -366,7 +367,7 @@ func writeOpenCodeInstructions(repoPath string, persona config.PersonaType, cust
 	}
 
 	// Write persona instruction file.
-	if err := atomicWrite(personaFile, []byte(personaText+"\n"), 0o644); err != nil {
+	if err := fsutil.AtomicWrite(personaFile, []byte(personaText+"\n"), 0o644); err != nil {
 		return err
 	}
 
@@ -465,5 +466,5 @@ func writeJSONDoc(path string, doc map[string]interface{}) error {
 	if err != nil {
 		return fmt.Errorf("marshaling %s: %w", filepath.Base(path), err)
 	}
-	return atomicWrite(path, append(out, '\n'), 0o644)
+	return fsutil.AtomicWrite(path, append(out, '\n'), 0o644)
 }

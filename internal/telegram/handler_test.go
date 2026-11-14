@@ -342,43 +342,6 @@ func TestQuestionKeyboard_ParenFormat(t *testing.T) {
 	}
 }
 
-// ── AttentionKeyboard ───────────────────────────────────────────
-
-func TestAttentionKeyboard_HasFourButtons(t *testing.T) {
-	kb := AttentionKeyboard("test-project")
-	if len(kb.InlineKeyboard) != 1 {
-		t.Fatalf("expected 1 row, got %d", len(kb.InlineKeyboard))
-	}
-	row := kb.InlineKeyboard[0]
-	if len(row) != 4 {
-		t.Fatalf("expected 4 buttons, got %d", len(row))
-	}
-
-	// Verify button labels (emoji-prefixed).
-	expected := []string{"🟡 yes", "🟡 no", "🟡 continue", "⏭ skip"}
-	for i, btn := range row {
-		if btn.Text != expected[i] {
-			t.Errorf("button %d: expected label %q, got %q", i, expected[i], btn.Text)
-		}
-	}
-
-	// Verify all callback data uses "reply" kind.
-	for _, btn := range row {
-		parts := strings.SplitN(*btn.CallbackData, ":", 3)
-		if len(parts) != 3 {
-			t.Fatalf("button %q: callback data %q not parseable", btn.Text, *btn.CallbackData)
-		}
-		if parts[0] != "reply" {
-			t.Errorf("button %q: expected kind 'reply', got %q", btn.Text, parts[0])
-		}
-		if parts[1] != "test-project" {
-			t.Errorf("button %q: expected project 'test-project', got %q", btn.Text, parts[1])
-		}
-	}
-}
-
-// ── ErrorKeyboard ───────────────────────────────────────────────
-
 func TestErrorKeyboard_HasThreeButtons(t *testing.T) {
 	kb := ErrorKeyboard("test-project")
 	if len(kb.InlineKeyboard) != 1 {

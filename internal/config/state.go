@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/openconductorhq/openconductor/internal/fsutil"
 )
 
 // TabState stores the persistent state of a single tab.
@@ -58,7 +60,7 @@ func SaveState(path string, state AppState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return fsutil.AtomicWrite(path, data, 0o644)
 }
 
 // FilterValidTabs returns only the tabs whose project still exists in the

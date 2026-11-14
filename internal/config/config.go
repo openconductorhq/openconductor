@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/openconductorhq/openconductor/internal/fsutil"
 )
 
 type AgentType string
@@ -188,25 +190,6 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// ValidatePersonaRef checks whether a persona reference is valid against
-// the built-in names and the config's custom personas. This is NOT called
-// from validate()/Load() so that a deleted custom persona does not prevent
-// config loading.
-func (c *Config) ValidatePersonaRef(persona PersonaType) error {
-	if persona == PersonaNone {
-		return nil
-	}
-	if BuiltinPersonaNames[persona] {
-		return nil
-	}
-	for _, cp := range c.Personas {
-		if PersonaType(cp.Name) == persona {
-			return nil
-		}
-	}
-	return fmt.Errorf("unknown persona %q", persona)
-}
-
 func LoadOrDefault(path string) *Config {
 	cfg, err := Load(path)
 	if err != nil {
@@ -233,7 +216,7 @@ func (c *Config) Save(path string) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := fsutil.AtomicWrite(path, data, 0o644); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/openconductorhq/openconductor/internal/fsutil"
 )
 
 const maxCompletionVisible = 5
@@ -26,14 +28,7 @@ func scanDirectories(partial string) []string {
 	}
 
 	// Expand ~/
-	expanded := partial
-	if strings.HasPrefix(expanded, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil
-		}
-		expanded = filepath.Join(home, expanded[2:])
-	}
+	expanded := fsutil.ExpandHome(partial)
 
 	// If partial ends with "/", list children of that directory.
 	// Otherwise, split into parent + prefix.

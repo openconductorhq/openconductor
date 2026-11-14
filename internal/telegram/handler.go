@@ -389,19 +389,6 @@ func PermissionKeyboard(project string) tgbotapi.InlineKeyboardMarkup {
 	)
 }
 
-// AttentionKeyboard returns an inline keyboard with common quick replies
-// for when the agent needs user input.
-func AttentionKeyboard(project string) tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🟡 yes", FormatCallbackData("reply", project, "yes")),
-			tgbotapi.NewInlineKeyboardButtonData("🟡 no", FormatCallbackData("reply", project, "no")),
-			tgbotapi.NewInlineKeyboardButtonData("🟡 continue", FormatCallbackData("reply", project, "continue")),
-			tgbotapi.NewInlineKeyboardButtonData("⏭ skip", FormatCallbackData("reply", project, "skip")),
-		),
-	)
-}
-
 // ErrorKeyboard returns an inline keyboard for error states.
 func ErrorKeyboard(project string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(

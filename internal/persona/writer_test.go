@@ -409,68 +409,6 @@ func TestBuildMarkedSection(t *testing.T) {
 	}
 }
 
-func TestAtomicWrite(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "testfile.md")
-	content := []byte("hello, world\n")
-
-	err := atomicWrite(path, content, 0o644)
-	if err != nil {
-		t.Fatalf("atomicWrite failed: %v", err)
-	}
-
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading written file: %v", err)
-	}
-	if string(got) != string(content) {
-		t.Errorf("content = %q, want %q", got, content)
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o644 {
-		t.Errorf("permissions = %o, want 644", perm)
-	}
-
-	// Verify no temp files are left behind.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("reading dir: %v", err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".persona-") {
-			t.Errorf("temp file left behind: %s", e.Name())
-		}
-	}
-}
-
-func TestAtomicWrite_OverwritesExisting(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "existing.md")
-
-	// Write initial content.
-	if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
-		t.Fatalf("writing initial file: %v", err)
-	}
-
-	// Overwrite with atomicWrite.
-	newContent := []byte("updated content\n")
-	if err := atomicWrite(path, newContent, 0o644); err != nil {
-		t.Fatalf("atomicWrite failed: %v", err)
-	}
-
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading file: %v", err)
-	}
-	if string(got) != string(newContent) {
-		t.Errorf("content = %q, want %q", got, newContent)
-	}
-}
-
 func TestWritePersonaSection_OpenCodeAgent(t *testing.T) {
 	dir := t.TempDir()
 

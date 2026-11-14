@@ -20,8 +20,8 @@ const (
 	sidebarNormal sidebarMode = iota
 	sidebarForm
 	sidebarConfirmDelete
-	sidebarPersonaSelect  // inline persona picker for existing project
-	sidebarConfirmReset   // confirmation before restarting sessions
+	sidebarPersonaSelect // inline persona picker for existing project
+	sidebarConfirmReset  // confirmation before restarting sessions
 )
 
 // Layout constants for click hit-testing.
@@ -33,16 +33,16 @@ const (
 )
 
 type sidebarModel struct {
-	projects       []config.Project
-	states         map[string]SessionState
-	openTabs       map[string]bool // tracks which projects have open tabs
-	selected       int
-	focused        bool
-	height         int
-	contentWidth   int
-	dragging       bool
-	mode           sidebarMode
-	form           formModel
+	projects             []config.Project
+	states               map[string]SessionState
+	openTabs             map[string]bool // tracks which projects have open tabs
+	selected             int
+	focused              bool
+	height               int
+	contentWidth         int
+	dragging             bool
+	mode                 sidebarMode
+	form                 formModel
 	animFrame            int // cycles 0..animFrameCount-1 for working badge breathing
 	customPersonas       []config.CustomPersona
 	personaPickerOptions []persona.PersonaOption // populated when entering sidebarPersonaSelect
