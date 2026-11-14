@@ -96,6 +96,17 @@ go test ./internal/config/...    # config loading tests
 go test ./internal/permission/...# permission classification tests
 ```
 
+End-to-end (real openconductor + real agents in tmux, sandboxed from your config):
+
+```bash
+scripts/e2e.sh start              # build, sandbox, launch (cc = Claude Code, oc = OpenCode)
+scripts/e2e.sh keys 'CMD: go version' Enter   # OpenCode's mock model runs that command
+scripts/e2e.sh screen             # print the screen
+scripts/e2e.sh stop
+```
+
+OpenCode and the L2 classifier talk to `scripts/e2e-mock-llm.py` (no tokens; `CMD:`/`TOOL:` messages become tool calls). Claude Code uses your real login on Haiku. `E2E_LLM=1 MOCK_DELAY=6` enables a slow L2 classifier.
+
 ## Common tasks
 
 - **Add a new agent adapter**: Implement `AgentAdapter` in a new file under `internal/agent/`, register it in `agent.go`. Optionally implement any combination of: `ChromeLineFilter`, `ChromeLayout`, `OutputFilter`, `QuestionResponder`, `HistoryProvider`, `ScreenFilter`, `SubmitDelay`, `ImageInputFormatter`.
