@@ -101,7 +101,7 @@ func (h *handler) HandleInbound(text string, threadID int) bool {
 		waitForReady(s, 30*time.Second)
 	}
 
-	writeWithEnter(s, text)
+	s.SubmitText(text)
 	logging.Info("telegram: forwarded message to agent", "project", project, "session", s.ID, "len", len(text))
 	return true
 }
@@ -166,11 +166,11 @@ func (h *handler) HandleCallback(b *Bot, query *tgbotapi.CallbackQuery) {
 				// Agent has no session-wide approval — fall back to single approve.
 				s.Write(adapter.ApproveKeystroke())
 			} else {
-				writePermKeystroke(s, ks)
+				s.WriteKeystroke(ks)
 			}
 			actionLabel = "Allowed always"
 		case "deny":
-			writePermKeystroke(s, adapter.DenyKeystroke())
+			s.WriteKeystroke(adapter.DenyKeystroke())
 			actionLabel = "Denied"
 		default:
 			b.answerCallbackRaw(query.ID, "Unknown action")
@@ -184,15 +184,15 @@ func (h *handler) HandleCallback(b *Bot, query *tgbotapi.CallbackQuery) {
 		adapter := h.getAdapter(project)
 		if qr, ok := adapter.(agent.QuestionResponder); ok {
 			num, _ := strconv.Atoi(action)
-			writePermKeystroke(s, qr.QuestionKeystroke(num))
+			s.WriteKeystroke(qr.QuestionKeystroke(num))
 		} else {
-			writeWithEnter(s, action)
+			s.SubmitText(action)
 		}
 		actionLabel = fmt.Sprintf("Selected: %s", action)
 
 	case "reply":
 		// Quick-reply action from Attention/Error keyboards.
-		writeWithEnter(s, action)
+		s.SubmitText(action)
 		actionLabel = fmt.Sprintf("Replied: %s", action)
 
 	default:
@@ -276,38 +276,6 @@ func waitForReady(s *session.Session, timeout time.Duration) {
 	logging.Debug("telegram: agent readiness timeout, sending anyway")
 }
 
-// writeWithEnter writes text to the session's PTY, pauses for the agent's
-// configured submit delay, then sends Enter (\r). The delay ensures the TUI's
-// event loop processes the text characters before receiving the submit key.
-// The delay comes from the agent adapter's SubmitDelay interface; agents that
-// don't need a delay (e.g. Claude Code) return 0.
-func writeWithEnter(s *session.Session, text string) {
-	s.Write([]byte(text))
-	if d := agent.GetSubmitDelay(s.Project.Agent); d > 0 {
-		time.Sleep(d)
-	}
-	s.Write([]byte("\r"))
-}
-
-// writePermKeystroke writes a permission keystroke to the session's PTY. If
-// the keystroke already ends with a submit character (\r or \n), it is written
-// as-is (e.g. Claude Code's "y\n"). Otherwise, the keystroke is navigation
-// for a selection dialog (e.g. OpenCode's arrow keys), so a SubmitDelay pause
-// and Enter are appended to confirm the selection.
-func writePermKeystroke(s *session.Session, ks []byte) {
-	s.Write(ks)
-	// If the keystroke already includes Enter/LF, the agent handles
-	// confirmation internally (e.g. Claude Code's "n\n").
-	if len(ks) > 0 && (ks[len(ks)-1] == '\r' || ks[len(ks)-1] == '\n') {
-		return
-	}
-	// Navigation-only keystroke (e.g. arrow keys) — confirm with Enter.
-	if d := agent.GetSubmitDelay(s.Project.Agent); d > 0 {
-		time.Sleep(d)
-	}
-	s.Write([]byte("\r"))
-}
-
 // HandleInboundMedia processes an inbound photo or document from a Telegram
 // Forum Topic. The file is downloaded, saved to <repo>/.openconductor/images/,
 // and the path (plus optional caption) is forwarded to the agent's PTY.
@@ -387,7 +355,7 @@ func (h *handler) HandleInboundMedia(
 	// Format the message for the agent.
 	msg := agent.FormatImageInput(s.Project.Agent, relPath, caption)
 
-	writeWithEnter(s, msg)
+	s.SubmitText(msg)
 	logging.Info("telegram: forwarded media to agent",
 		"project", project,
 		"session", s.ID,

@@ -158,6 +158,17 @@ func rulesFor(agentType config.AgentType) []patternRule {
 	}
 }
 
+// bashCmdPatterns are tried in order: most specific wins.
+// Each captures the first meaningful token after the keyword.
+var bashCmdPatterns = []*regexp.Regexp{
+	// OpenCode: "← Execute command npm install" / "← Run command git status"
+	regexp.MustCompile(`(?i)(?:execute|run)\s+command\s+(\w+)`),
+	// Claude Code: "Allow running bash command: git status"
+	regexp.MustCompile(`(?i)command:\s+(\w+)`),
+	regexp.MustCompile(`(?i)bash:\s+(\w+)`),
+	regexp.MustCompile(`(?i)running\s+(\w+)`),
+}
+
 // refineBashCategory inspects the terminal text for the actual command name
 // being executed and returns BashSafe if it is on the safe list, otherwise
 // BashAny.
@@ -168,18 +179,7 @@ func rulesFor(agentType config.AgentType) []patternRule {
 func refineBashCategory(text string) Category {
 	safe := BashSafeCommandSet()
 
-	// Patterns tried in order: most specific wins.
-	// Each captures the first meaningful token after the keyword.
-	cmdPatterns := []*regexp.Regexp{
-		// OpenCode: "← Execute command npm install" / "← Run command git status"
-		regexp.MustCompile(`(?i)(?:execute|run)\s+command\s+(\w+)`),
-		// Claude Code: "Allow running bash command: git status"
-		regexp.MustCompile(`(?i)command:\s+(\w+)`),
-		regexp.MustCompile(`(?i)bash:\s+(\w+)`),
-		regexp.MustCompile(`(?i)running\s+(\w+)`),
-	}
-
-	for _, re := range cmdPatterns {
+	for _, re := range bashCmdPatterns {
 		m := re.FindStringSubmatch(text)
 		if len(m) < 2 {
 			continue

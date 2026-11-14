@@ -533,10 +533,10 @@ func TestParseQuestionOptions_FooterInSecondToLastRow(t *testing.T) {
 	}
 }
 
-// ── writePermKeystroke ───────────────────────────────────────────
+// ── Session.WriteKeystroke ───────────────────────────────────────
 
 // pipeSession creates a session with a pipe as the PTY fd. The reader
-// end collects what writePermKeystroke sends. Close reader when done.
+// end collects what Session.WriteKeystroke sends. Close reader when done.
 func pipeSession(t *testing.T, agentType config.AgentType) (*session.Session, *os.File) {
 	t.Helper()
 	r, w, err := os.Pipe()
@@ -564,9 +564,9 @@ func readAll(r *os.File) []byte {
 
 func TestWritePermKeystroke_NavigationAddsEnter(t *testing.T) {
 	// OpenCode "Allow always": navigation-only keystroke (Right arrow).
-	// writePermKeystroke should append Enter after SubmitDelay.
+	// Session.WriteKeystroke should append Enter after SubmitDelay.
 	s, r := pipeSession(t, "opencode")
-	writePermKeystroke(s, []byte("\x1b[C"))
+	s.WriteKeystroke([]byte("\x1b[C"))
 	got := readAll(r)
 	// Expect: Right arrow + Enter.
 	want := "\x1b[C\r"
@@ -577,9 +577,9 @@ func TestWritePermKeystroke_NavigationAddsEnter(t *testing.T) {
 
 func TestWritePermKeystroke_AlreadyHasLF_NoExtra(t *testing.T) {
 	// Claude Code "deny": keystroke already ends with \n.
-	// writePermKeystroke should NOT send an extra Enter.
+	// Session.WriteKeystroke should NOT send an extra Enter.
 	s, r := pipeSession(t, "claude")
-	writePermKeystroke(s, []byte("n\n"))
+	s.WriteKeystroke([]byte("n\n"))
 	got := readAll(r)
 	if string(got) != "n\n" {
 		t.Errorf("expected %q, got %q", "n\n", got)
@@ -589,7 +589,7 @@ func TestWritePermKeystroke_AlreadyHasLF_NoExtra(t *testing.T) {
 func TestWritePermKeystroke_EndsWithCR_NoExtra(t *testing.T) {
 	// OpenCode "Allow once": keystroke is just \r.
 	s, r := pipeSession(t, "opencode")
-	writePermKeystroke(s, []byte("\r"))
+	s.WriteKeystroke([]byte("\r"))
 	got := readAll(r)
 	if string(got) != "\r" {
 		t.Errorf("expected %q, got %q", "\r", got)
@@ -600,11 +600,11 @@ func TestWritePermKeystroke_EndsWithCR_NoExtra(t *testing.T) {
 
 func TestQuestionKeystroke_Option1_JustEnter(t *testing.T) {
 	// Option 1 is already selected — QuestionKeystroke returns nil,
-	// writePermKeystroke sends delay + Enter.
+	// Session.WriteKeystroke sends delay + Enter.
 	s, r := pipeSession(t, "opencode")
 	a, _ := agent.Get("opencode")
 	qr := a.(agent.QuestionResponder)
-	writePermKeystroke(s, qr.QuestionKeystroke(1))
+	s.WriteKeystroke(qr.QuestionKeystroke(1))
 	got := readAll(r)
 	if string(got) != "\r" {
 		t.Errorf("option 1: expected %q, got %q", "\r", got)
@@ -615,7 +615,7 @@ func TestQuestionKeystroke_Option2_OneDownArrow(t *testing.T) {
 	s, r := pipeSession(t, "opencode")
 	a, _ := agent.Get("opencode")
 	qr := a.(agent.QuestionResponder)
-	writePermKeystroke(s, qr.QuestionKeystroke(2))
+	s.WriteKeystroke(qr.QuestionKeystroke(2))
 	got := readAll(r)
 	// Expect: 1 down arrow + Enter.
 	want := "\x1b[B\r"
@@ -628,7 +628,7 @@ func TestQuestionKeystroke_Option3_TwoDownArrows(t *testing.T) {
 	s, r := pipeSession(t, "opencode")
 	a, _ := agent.Get("opencode")
 	qr := a.(agent.QuestionResponder)
-	writePermKeystroke(s, qr.QuestionKeystroke(3))
+	s.WriteKeystroke(qr.QuestionKeystroke(3))
 	got := readAll(r)
 	// Expect: 2 down arrows + Enter.
 	want := "\x1b[B\x1b[B\r"
@@ -642,7 +642,7 @@ func TestQuestionKeystroke_Option0_FallsBackToEnter(t *testing.T) {
 	s, r := pipeSession(t, "opencode")
 	a, _ := agent.Get("opencode")
 	qr := a.(agent.QuestionResponder)
-	writePermKeystroke(s, qr.QuestionKeystroke(0))
+	s.WriteKeystroke(qr.QuestionKeystroke(0))
 	got := readAll(r)
 	if string(got) != "\r" {
 		t.Errorf("option 0: expected %q, got %q", "\r", got)

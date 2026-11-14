@@ -86,64 +86,6 @@ func newTerminalModel() terminalModel {
 	}
 }
 
-func (m *terminalModel) StartShell(width, height int) tea.Cmd {
-	m.width = width
-	m.height = height
-
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/bash"
-	}
-
-	return m.startProcess(exec.Command(shell), width, height)
-}
-
-func (m *terminalModel) StartCommand(args []string, dir string, width, height int) tea.Cmd {
-	m.width = width
-	m.height = height
-
-	if len(args) == 0 {
-		return nil
-	}
-	cmd := exec.Command(args[0], args[1:]...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-
-	return m.startProcess(cmd, width, height)
-}
-
-func (m *terminalModel) startProcess(cmd *exec.Cmd, width, height int) tea.Cmd {
-	if width < 1 {
-		width = 80
-	}
-	if height < 1 {
-		height = 24
-	}
-
-	vt := vt10x.New(vt10x.WithSize(width, height))
-	m.vt = vt
-
-	cmd.Env = append(os.Environ(),
-		"TERM=xterm-256color",
-		"COLORTERM=truecolor",
-	)
-
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: uint16(height),
-		Cols: uint16(width),
-	})
-	if err != nil {
-		return func() tea.Msg { return ptyExitedMsg{err: err} }
-	}
-
-	m.ptmx = ptmx
-	m.cmd = cmd
-	m.active = true
-
-	return m.readLoop()
-}
-
 func (m *terminalModel) readLoop() tea.Cmd {
 	return func() tea.Msg {
 		buf := make([]byte, 4096)
@@ -160,7 +102,7 @@ func (m *terminalModel) readLoop() tea.Cmd {
 // Update handles terminal-level messages. In the OpenConductor app flow,
 // this method is NOT called — the App handles session I/O at a higher level
 // (sessionOutputMsg + timer-based runScrollCheck). This Update path exists
-// for standalone terminalModel use (StartShell/StartCommand) and is
+// for standalone terminalModel use and is
 // exercised by scrollback_test.go.
 func (m terminalModel) Update(msg tea.Msg) (terminalModel, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -351,9 +293,11 @@ func (m terminalModel) renderViewportRow(sb *strings.Builder, row int, cursorCol
 	var curFG vt10x.Color = vt10x.DefaultFG
 	var curBG vt10x.Color = vt10x.DefaultBG
 	var curMode int16
+	hasSel := m.selectionActive()
 
 	for col := 0; col < m.width; col++ {
 		g := m.vt.Cell(col, row)
+		selected := hasSel && m.IsSelected(col, row)
 		ch := g.Char
 		if ch == 0 {
 			ch = ' '
@@ -366,7 +310,7 @@ func (m terminalModel) renderViewportRow(sb *strings.Builder, row int, cursorCol
 		}
 
 		// Highlight selected cells with reverse video.
-		if m.IsSelected(col, row) {
+		if selected {
 			g.Mode ^= int16(vtAttrReverse)
 		}
 
@@ -380,7 +324,7 @@ func (m terminalModel) renderViewportRow(sb *strings.Builder, row int, cursorCol
 
 		// After drawing the cursor or selection cell, force a fresh SGR
 		// on the next cell so the reverse doesn't bleed.
-		if col == cursorCol || m.IsSelected(col, row) {
+		if col == cursorCol || selected {
 			curFG = vt10x.Color(0xFFFFFFFF)
 			curBG = vt10x.Color(0xFFFFFFFF)
 			curMode = -1
@@ -406,15 +350,17 @@ func (m terminalModel) renderGlyphRow(sb *strings.Builder, glyphs []vt10x.Glyph,
 		renderWidth = m.width
 	}
 
+	hasSel := m.selectionActive()
 	for col := 0; col < renderWidth; col++ {
 		g := glyphs[col]
+		selected := hasSel && m.IsSelected(col, displayRow)
 		ch := g.Char
 		if ch == 0 {
 			ch = ' '
 		}
 
 		// Highlight selected cells with reverse video.
-		if m.IsSelected(col, displayRow) {
+		if selected {
 			g.Mode ^= int16(vtAttrReverse)
 		}
 
@@ -427,7 +373,7 @@ func (m terminalModel) renderGlyphRow(sb *strings.Builder, glyphs []vt10x.Glyph,
 		sb.WriteRune(ch)
 
 		// Force fresh SGR after selection cell so reverse doesn't bleed.
-		if m.IsSelected(col, displayRow) {
+		if selected {
 			curFG = vt10x.Color(0xFFFFFFFF)
 			curBG = vt10x.Color(0xFFFFFFFF)
 			curMode = -1

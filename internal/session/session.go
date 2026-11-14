@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/hinshun/vt10x"
@@ -360,6 +361,17 @@ func (s *Session) captureScrollOff(data []byte) {
 	// Detect how many rows scrolled off by finding where old content
 	// ended up in the new screen. Check multiple old rows against the
 	// new screen to find the shift.
+	var sb strings.Builder
+	for col := 0; col < w; col++ {
+		g := vt.Cell(col, 0)
+		if g.Char == 0 {
+			sb.WriteRune(' ')
+		} else {
+			sb.WriteRune(g.Char)
+		}
+	}
+	newRow0 := strings.TrimRight(sb.String(), " ")
+
 	scrolled := 0
 	for shift := 1; shift < h; shift++ {
 		// Check if old[shift] == new[0]: the old row at position 'shift'
@@ -367,16 +379,6 @@ func (s *Session) captureScrollOff(data []byte) {
 		if preTexts[shift] == "" {
 			continue
 		}
-		var sb strings.Builder
-		for col := 0; col < w; col++ {
-			g := vt.Cell(col, 0)
-			if g.Char == 0 {
-				sb.WriteRune(' ')
-			} else {
-				sb.WriteRune(g.Char)
-			}
-		}
-		newRow0 := strings.TrimRight(sb.String(), " ")
 		if preTexts[shift] == newRow0 {
 			scrolled = shift
 			break
@@ -459,13 +461,6 @@ func (s *Session) GetVT() (vt vt10x.Terminal, width, height int) {
 	return s.VT, s.Width, s.Height
 }
 
-// IsRunning reports whether the session has an active PTY process.
-func (s *Session) IsRunning() bool {
-	s.Mu.RLock()
-	defer s.Mu.RUnlock()
-	return !s.closed && s.Ptmx != nil
-}
-
 // Close terminates the agent process and releases PTY resources.
 func (s *Session) Close() {
 	s.Mu.Lock()
@@ -484,4 +479,31 @@ func (s *Session) Close() {
 	}
 
 	s.State = StateStopped
+}
+
+// SubmitText writes text to the PTY, pauses for the agent's submit delay,
+// then sends Enter (\r). The delay lets TUI agents (e.g. OpenCode) process
+// the typed characters before the submit key arrives.
+func (s *Session) SubmitText(text string) {
+	s.Write([]byte(text))
+	s.submit()
+}
+
+// WriteKeystroke writes a permission/question keystroke. If it already ends
+// with \r or \n (e.g. Claude Code's "y\n") it is written as-is; otherwise it
+// is a navigation sequence (e.g. OpenCode's arrow keys) and is confirmed with
+// Enter after the agent's submit delay.
+func (s *Session) WriteKeystroke(ks []byte) {
+	s.Write(ks)
+	if len(ks) > 0 && (ks[len(ks)-1] == '\r' || ks[len(ks)-1] == '\n') {
+		return
+	}
+	s.submit()
+}
+
+func (s *Session) submit() {
+	if d := agent.GetSubmitDelay(s.Project.Agent); d > 0 {
+		time.Sleep(d)
+	}
+	s.Write([]byte("\r"))
 }

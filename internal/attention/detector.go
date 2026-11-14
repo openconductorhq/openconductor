@@ -5,14 +5,12 @@ package attention
 
 import (
 	"context"
-	"time"
 
 	"github.com/openconductorhq/openconductor/internal/logging"
 )
 
 const (
-	defaultCheckInterval = 500 * time.Millisecond
-	lastLinesCount       = 50
+	lastLinesCount = 50
 )
 
 // Detector performs L1 heuristic-based attention detection on terminal
@@ -21,27 +19,19 @@ const (
 // When a Classifier is configured, heuristic results with Uncertain
 // confidence are forwarded to the LLM for a definitive classification.
 type Detector struct {
-	checkInterval time.Duration
-	classifier    *Classifier
+	classifier *Classifier
 }
 
 // NewDetector creates a Detector with default configuration and no L2
 // classifier. Use SetClassifier to enable LLM escalation.
 func NewDetector() *Detector {
-	return &Detector{
-		checkInterval: defaultCheckInterval,
-	}
+	return &Detector{}
 }
 
 // SetClassifier configures the L2 LLM classifier for uncertain results.
 // If nil, uncertain heuristic results are treated as no event.
 func (d *Detector) SetClassifier(c *Classifier) {
 	d.classifier = c
-}
-
-// CheckInterval returns the configured interval between attention checks.
-func (d *Detector) CheckInterval() time.Duration {
-	return d.checkInterval
 }
 
 // Check examines recent terminal output and process state to determine

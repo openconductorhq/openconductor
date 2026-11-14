@@ -630,7 +630,7 @@ func testTabWidth(sessionID string, state SessionState, isActive bool) int {
 	if isActive {
 		return lipgloss.Width(tabActiveStyle.Render(label))
 	}
-	return lipgloss.Width(inactiveTabStyle(state).Render(label))
+	return lipgloss.Width(tabStyle.Render(label))
 }
 
 func TestTabHitTestSingleTab(t *testing.T) {
@@ -1537,21 +1537,6 @@ func TestLayoutUsesTermDimensions(t *testing.T) {
 }
 
 // ── Inactive tab style tests ────────────────────────────────────
-
-func TestInactiveTabStyleByState(t *testing.T) {
-	// All inactive tabs use the same subtle style regardless of state.
-	// The badge character communicates state, not the border color.
-	allStates := []SessionState{
-		StateNeedsAttention, StateNeedsPermission, StateAsking,
-		StateError, StateDone, StateWorking, StateIdle,
-	}
-	for _, state := range allStates {
-		got := inactiveTabStyle(state)
-		if got.Render("X") != tabStyle.Render("X") {
-			t.Errorf("inactiveTabStyle(%v): expected default tabStyle, got different style", state)
-		}
-	}
-}
 
 func TestAttentionEventToState_NeedsAnswer(t *testing.T) {
 	event := &attention.AttentionEvent{Type: attention.NeedsAnswer}

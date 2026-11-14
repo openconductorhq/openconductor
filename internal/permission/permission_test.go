@@ -274,20 +274,6 @@ func TestTryMatch_OpenCode_NoMatch_WorkingState(t *testing.T) {
 	}
 }
 
-// ── DetectionModeFor ─────────────────────────────────────────────────────────
-
-func TestDetectionModeFor_AllAgentsUseL1First(t *testing.T) {
-	agents := []config.AgentType{
-		config.AgentClaudeCode,
-		config.AgentOpenCode,
-	}
-	for _, at := range agents {
-		if DetectionModeFor(at) != ModeL1First {
-			t.Fatalf("expected ModeL1First for %s", at)
-		}
-	}
-}
-
 // ── Detector ─────────────────────────────────────────────────────────────────
 
 func TestDetector_L1Hit_NoClassifier(t *testing.T) {
@@ -312,7 +298,7 @@ func TestDetector_L1Miss_NoClassifier_ReturnsNil(t *testing.T) {
 }
 
 func TestDetector_OpenCode_PermissionDialog_L1Hit(t *testing.T) {
-	// OpenCode now uses ModeL1First. A real permission dialog fixture should
+	// A real permission dialog fixture should
 	// be classified by the L1 pattern matcher without needing the LLM.
 	d := NewDetector(nil) // no L2 classifier
 	lines := simulateOpenCodeExternalDirLines()

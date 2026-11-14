@@ -427,8 +427,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Start a session for each restored tab, resuming the previous
 			// conversation (--continue for OpenCode).
 			for _, name := range a.pendingRestoreTabs {
-				if p, ok := a.projectByName(name); ok {
-					cmds = append(cmds, a.startSessionCmd(p, true))
+				if i := a.projectIndexByName(name); i >= 0 {
+					cmds = append(cmds, a.startSessionCmd(a.cfg.Projects[i], true))
 				}
 			}
 			a.pendingRestoreTabs = nil
@@ -1398,11 +1398,25 @@ func (a *App) toggleFocus() {
 	}
 }
 
-// inactiveTabStyle returns the style for an inactive tab. All inactive tabs
-// use the same subtle charcoal border for visual consistency — the badge
-// character (◆ ● ! ? ✓) already communicates session state.
-func inactiveTabStyle(_ SessionState) lipgloss.Style {
-	return tabStyle
+// renderTab renders the tab at index i in openTabs. Shared by tabBarView and
+// tabHitTest so hit-testing always matches what is drawn. All inactive tabs
+// use the same subtle style — the badge character communicates state.
+func (a App) renderTab(i int) string {
+	sessionID := a.openTabs[i]
+	char := badgeChar(a.sessionStates[sessionID], a.animFrame)
+
+	var label string
+	if i == a.editingTab {
+		// Editing: show buffer with cursor.
+		label = char + " " + a.tabEditBuf + "▏ ✕"
+	} else {
+		label = char + " " + a.tabDisplayName(sessionID) + " ✕"
+	}
+
+	if sessionID == a.mgr.ActiveName() {
+		return tabActiveStyle.Render(label)
+	}
+	return tabStyle.Render(label)
 }
 
 // tabBarView renders the tab bar using the lipgloss border technique.
@@ -1418,25 +1432,9 @@ func (a App) tabBarView() string {
 	activeSessionID := a.mgr.ActiveName()
 
 	// Render each tab as a bordered box. All tabs show a close button ✕.
-	var renderedTabs []string
-	for i, sessionID := range a.openTabs {
-		state := a.sessionStates[sessionID]
-		char := badgeChar(state, a.animFrame)
-		displayName := a.tabDisplayName(sessionID)
-
-		var label string
-		if i == a.editingTab {
-			// Editing: show buffer with cursor.
-			label = char + " " + a.tabEditBuf + "▏ ✕"
-		} else {
-			label = char + " " + displayName + " ✕"
-		}
-
-		if sessionID == activeSessionID {
-			renderedTabs = append(renderedTabs, tabActiveStyle.Render(label))
-		} else {
-			renderedTabs = append(renderedTabs, inactiveTabStyle(state).Render(label))
-		}
+	renderedTabs := make([]string, len(a.openTabs))
+	for i := range a.openTabs {
+		renderedTabs[i] = a.renderTab(i)
 	}
 
 	// Join tabs side by side (aligned at top). If the total width
@@ -1748,17 +1746,17 @@ func (a *App) runScrollCheck() {
 //
 // Two detection strategies are used:
 //
-// 1. Session.captureScrollOff (non-alt-screen only): runs synchronously on
-//    every VT.Write() and reliably catches all scroll events. When captures
-//    are found, they are pushed with PushForce (no buffer-wide dedup) so that
-//    legitimate duplicate content — repeated table rows, code patterns, blank
-//    separator lines — is preserved exactly as it appeared. Snapshot-based
-//    detection is skipped to avoid dual-detection duplicates.
+//  1. Session.captureScrollOff (non-alt-screen only): runs synchronously on
+//     every VT.Write() and reliably catches all scroll events. When captures
+//     are found, they are pushed with PushForce (no buffer-wide dedup) so that
+//     legitimate duplicate content — repeated table rows, code patterns, blank
+//     separator lines — is preserved exactly as it appeared. Snapshot-based
+//     detection is skipped to avoid dual-detection duplicates.
 //
-// 2. Snapshot-based detection (fallback): compares the current VT screen
-//    against the stored snapshot to detect scroll shifts or TUI repaints.
-//    Uses buffer-wide dedup (Push) to prevent flooding from alt-screen TUI
-//    apps that repaint every ~100ms.
+//  2. Snapshot-based detection (fallback): compares the current VT screen
+//     against the stored snapshot to detect scroll shifts or TUI repaints.
+//     Uses buffer-wide dedup (Push) to prevent flooding from alt-screen TUI
+//     apps that repaint every ~100ms.
 func (a *App) checkScrollback(s *session.Session, sessionID string) int {
 	sb := a.scrollbacks[sessionID]
 	if sb == nil {
@@ -2019,8 +2017,6 @@ func (a *App) resizeAllSessions() {
 // Only visible tabs (from visibleTabs) are considered, so clicks map correctly
 // even when the tab bar is truncated due to narrow terminal width.
 func (a App) tabHitTest(localX int) (int, bool) {
-	activeSessionID := a.mgr.ActiveName()
-
 	// Use visibleTabs if set, otherwise fall back to all openTabs.
 	indices := a.visibleTabs
 	if len(indices) == 0 {
@@ -2035,24 +2031,7 @@ func (a App) tabHitTest(localX int) (int, bool) {
 		if i < 0 || i >= len(a.openTabs) {
 			continue
 		}
-		sessionID := a.openTabs[i]
-		state := a.sessionStates[sessionID]
-		char := badgeChar(state, a.animFrame)
-		displayName := a.tabDisplayName(sessionID)
-
-		var label string
-		if i == a.editingTab {
-			label = char + " " + a.tabEditBuf + "▏ ✕"
-		} else {
-			label = char + " " + displayName + " ✕"
-		}
-
-		var w int
-		if sessionID == activeSessionID {
-			w = lipgloss.Width(tabActiveStyle.Render(label))
-		} else {
-			w = lipgloss.Width(inactiveTabStyle(state).Render(label))
-		}
+		w := lipgloss.Width(a.renderTab(i))
 
 		if localX >= offset && localX < offset+w {
 			closeRegionStart := offset + w - tabCloseRegion
@@ -2135,17 +2114,6 @@ func (a *App) saveState() {
 		a.stateSaved = true
 		logging.Debug("state saved", "tabs", len(tabs), "active", activeProject)
 	}
-}
-
-// projectByName returns the project with the given name and true, or a zero
-// value and false if not found.
-func (a App) projectByName(name string) (config.Project, bool) {
-	for _, p := range a.cfg.Projects {
-		if p.Name == name {
-			return p, true
-		}
-	}
-	return config.Project{}, false
 }
 
 // projectIndexByName returns the index of the project with the given name, or -1.
@@ -2347,18 +2315,7 @@ func (a *App) checkAttention() {
 								"bytesHex", fmt.Sprintf("%x", result.Keystroke),
 								"bytesLen", len(result.Keystroke),
 							)
-							s.Write(result.Keystroke)
-							// If the keystroke is a navigation sequence (e.g.
-							// Right arrow to "Allow always"), it needs Enter
-							// to confirm the selection. Same logic as the
-							// Telegram handler's writePermKeystroke.
-							ks := result.Keystroke
-							if len(ks) > 0 && ks[len(ks)-1] != '\r' && ks[len(ks)-1] != '\n' {
-								if d := agent.GetSubmitDelay(s.Project.Agent); d > 0 {
-									time.Sleep(d)
-								}
-								s.Write([]byte("\r"))
-							}
+							s.WriteKeystroke(result.Keystroke)
 							a.sessionStates[sessionID] = StateWorking
 							a.statusbar.states[sessionID] = StateWorking
 							a.sidebar.states[projectName] = a.aggregateProjectState(projectName)
