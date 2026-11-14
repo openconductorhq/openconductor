@@ -130,6 +130,11 @@ type App struct {
 	// auto-approve is bypassed so the normal Telegram notification fires.
 	autoApproveRuns map[string]int
 
+	// attentionInFlight is true while a detectAttention command is running.
+	// Ticks are skipped until it reports back so slow L2 LLM calls never
+	// pile up or run concurrently.
+	attentionInFlight bool
+
 	// animFrame cycles 0..animFrameCount-1 every AnimTickMsg (~600ms) to
 	// drive the working badge breathing animation.
 	animFrame int
@@ -1298,10 +1303,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case TickMsg:
-		// Run attention detection on the active session.
-		a.checkAttention()
+		// Attention detection (which may call an LLM) runs off the UI
+		// thread; results come back as attentionResultsMsg.
+		if !a.attentionInFlight {
+			if cmd := a.detectAttentionCmd(); cmd != nil {
+				a.attentionInFlight = true
+				cmds = append(cmds, cmd)
+			}
+		}
 		cmds = append(cmds, tickCmd())
 		return a, tea.Batch(cmds...)
+
+	case attentionResultsMsg:
+		a.attentionInFlight = false
+		a.applyAttention(msg)
+		return a, nil
 	}
 
 	return a, tea.Batch(cmds...)
@@ -2223,44 +2239,95 @@ func (a *App) markWorking(sessionID, projectName string) {
 	delete(a.stateStickUntil, sessionID)
 }
 
-// checkAttention runs attention detection on ALL sessions (not just the
-// active one) using the L1 heuristic detector with optional L2 LLM
-// escalation. Updates sidebar/statusbar state accordingly.
-//
-// Sticky logic: when a project enters an attention state, it is held for at
-// least stateStickDuration before being downgraded back to Working. This
-// prevents visual flicker when transient signals scroll off screen between
-// ticks.
-func (a *App) checkAttention() {
-	ctx := context.Background()
-	now := time.Now()
+// attentionInput is a UI-thread snapshot of one session for detection.
+type attentionInput struct {
+	sessionID  string
+	project    config.Project
+	lines      []string
+	pid        int
+	checker    attention.AttentionChecker
+	keystrokes *attention.ApprovalKeystrokes // nil when the agent is unknown
+}
 
+// attentionResult is the detection outcome for one session.
+type attentionResult struct {
+	sessionID string
+	lines     []string
+	event     *attention.AttentionEvent
+	isWorking bool
+	approve   *attention.AutoApproveResult // set only for auto-approvable permission events
+}
+
+// attentionResultsMsg carries one detection pass back to Update.
+type attentionResultsMsg []attentionResult
+
+// detectAttentionCmd snapshots every session on the UI thread and returns a
+// command that runs L1 heuristics, L2 LLM escalation and auto-approve
+// classification in the background. Returns nil when there are no sessions.
+func (a *App) detectAttentionCmd() tea.Cmd {
+	var inputs []attentionInput
 	for _, s := range a.mgr.AllSessions() {
 		lines := s.GetScreenLines()
 		if lines == nil {
 			continue
 		}
-
-		sessionID := s.ID
-		projectName := s.Project.Name
-
-		// Get the process PID for liveness checking.
-		pid := 0
+		in := attentionInput{sessionID: s.ID, project: s.Project, lines: lines}
 		if s.Cmd != nil {
-			pid = s.Cmd.Pid
+			in.pid = s.Cmd.Pid
 		}
-
-		prevState := a.sessionStates[sessionID]
-
-		// Look up the agent adapter and cast to AttentionChecker if supported.
-		var checker attention.AttentionChecker
 		if adapter, err := agent.Get(s.Project.Agent); err == nil {
 			if c, ok := adapter.(attention.AttentionChecker); ok {
-				checker = c
+				in.checker = c
+			}
+			in.keystrokes = &attention.ApprovalKeystrokes{
+				Approve:        adapter.ApproveKeystroke(),
+				ApproveSession: adapter.ApproveSessionKeystroke(),
 			}
 		}
+		inputs = append(inputs, in)
+	}
+	if len(inputs) == 0 {
+		return nil
+	}
 
-		event, isWorking := a.detector.Check(ctx, sessionID, lines, pid, checker)
+	detector, approver := a.detector, a.autoApprover
+	return func() tea.Msg {
+		ctx := context.Background()
+		results := make(attentionResultsMsg, 0, len(inputs))
+		for _, in := range inputs {
+			event, isWorking := detector.Check(ctx, in.sessionID, in.lines, in.pid, in.checker)
+			r := attentionResult{sessionID: in.sessionID, lines: in.lines, event: event, isWorking: isWorking}
+			if event != nil && len(event.AutoKeystroke) == 0 &&
+				event.Type == attention.NeedsPermission && approver != nil && in.keystrokes != nil {
+				res := approver.CheckAndApprove(ctx, in.project, in.lines, *in.keystrokes)
+				r.approve = &res
+			}
+			results = append(results, r)
+		}
+		return results
+	}
+}
+
+// applyAttention updates sidebar/statusbar state from a detection pass.
+//
+// Sticky logic: when a project enters an attention state, it is held for at
+// least stateStickDuration before being downgraded back to Working. This
+// prevents visual flicker when transient signals scroll off screen between
+// ticks.
+func (a *App) applyAttention(results attentionResultsMsg) {
+	now := time.Now()
+
+	for _, r := range results {
+		s := a.mgr.GetSession(r.sessionID)
+		if s == nil {
+			continue // closed while detection was running
+		}
+		sessionID := s.ID
+		projectName := s.Project.Name
+		lines := r.lines
+		event, isWorking := r.event, r.isWorking
+		prevState := a.sessionStates[sessionID]
+
 		logging.Debug("attention check",
 			"session", sessionID,
 			"project", projectName,
@@ -2289,43 +2356,34 @@ func (a *App) checkAttention() {
 
 			// Auto-approve permission requests when the project is configured
 			// to do so and the classifier identifies the category as allowed.
-
-			if event.Type == attention.NeedsPermission && a.autoApprover != nil {
-				adapter, adapterErr := agent.Get(s.Project.Agent)
-				if adapterErr == nil {
-					keystrokes := attention.ApprovalKeystrokes{
-						Approve:        adapter.ApproveKeystroke(),
-						ApproveSession: adapter.ApproveSessionKeystroke(),
-					}
-					result := a.autoApprover.CheckAndApprove(ctx, s.Project, lines, keystrokes)
-					if result.ShouldApprove {
-						a.autoApproveRuns[sessionID]++
-						if a.autoApproveRuns[sessionID] > autoApproveMaxRuns {
-							// Auto-approve has fired too many consecutive times.
-							// The dialog is stuck or permissions are queuing
-							// faster than we can dismiss. Fall through to the
-							// normal notification path so the user gets a
-							// Telegram/desktop alert.
-							logging.Info("auto-approve: stuck, falling through to notification",
-								"project", projectName,
-								"session", sessionID,
-								"runs", a.autoApproveRuns[sessionID],
-							)
-						} else {
-							// Send the approval keystroke to the PTY and treat
-							// the session as Working — no notification needed.
-							logging.Info("auto-approve: sending keystroke",
-								"project", projectName,
-								"session", sessionID,
-								"run", a.autoApproveRuns[sessionID],
-								"bytesHex", fmt.Sprintf("%x", result.Keystroke),
-								"bytesLen", len(result.Keystroke),
-							)
-							s.WriteKeystroke(result.Keystroke)
-							a.markWorking(sessionID, projectName)
-							continue
-						}
-					}
+			if result := r.approve; result != nil && result.ShouldApprove {
+				a.autoApproveRuns[sessionID]++
+				if a.autoApproveRuns[sessionID] > autoApproveMaxRuns {
+					// Auto-approve has fired too many consecutive times.
+					// The dialog is stuck or permissions are queuing
+					// faster than we can dismiss. Fall through to the
+					// normal notification path so the user gets a
+					// Telegram/desktop alert.
+					logging.Info("auto-approve: stuck, falling through to notification",
+						"project", projectName,
+						"session", sessionID,
+						"runs", a.autoApproveRuns[sessionID],
+					)
+				} else {
+					// Send the approval keystroke to the PTY and treat
+					// the session as Working — no notification needed.
+					logging.Info("auto-approve: sending keystroke",
+						"project", projectName,
+						"session", sessionID,
+						"run", a.autoApproveRuns[sessionID],
+						"bytesHex", fmt.Sprintf("%x", result.Keystroke),
+						"bytesLen", len(result.Keystroke),
+					)
+					// WriteKeystroke may sleep for the agent's submit delay;
+					// keep that off the UI thread.
+					go s.WriteKeystroke(result.Keystroke)
+					a.markWorking(sessionID, projectName)
+					continue
 				}
 			}
 

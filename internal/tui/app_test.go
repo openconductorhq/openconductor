@@ -2567,3 +2567,47 @@ func TestWheelAltScreen_MouseMode_CoordinatesCorrect(t *testing.T) {
 		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
+
+func TestAttentionDetection_RunsOffUIThreadAndApplies(t *testing.T) {
+	app := NewApp(configWithProjects(), "", nil)
+	vt := vt10x.New(vt10x.WithSize(80, 10))
+	vt.Write([]byte("some context\r\nDo you want to proceed? (y/n)"))
+	app.mgr.InjectSession("proj1", &session.Session{
+		Project: app.cfg.Projects[0], VT: vt, State: session.StateRunning, Width: 80, Height: 10,
+	})
+	app.addTab("proj1")
+
+	// A tick marks detection in flight; a second tick must not start another.
+	m, _ := app.Update(TickMsg{})
+	app = m.(App)
+	if !app.attentionInFlight {
+		t.Fatal("expected detection in flight after tick")
+	}
+	if app.sessionStates["proj1"] == StateNeedsPermission {
+		t.Fatal("state must not change until results arrive")
+	}
+
+	// Run the detection command and feed its result back.
+	msg := app.detectAttentionCmd()()
+	m, _ = app.Update(msg)
+	app = m.(App)
+	if app.attentionInFlight {
+		t.Error("expected in-flight flag cleared after results")
+	}
+	if got := app.sessionStates["proj1"]; got != StateNeedsPermission {
+		t.Errorf("state = %v, want %v", got, StateNeedsPermission)
+	}
+}
+
+func TestAttentionResults_IgnoresClosedSession(t *testing.T) {
+	app := NewApp(configWithProjects(), "", nil)
+	app.attentionInFlight = true
+	m, _ := app.Update(attentionResultsMsg{{sessionID: "gone", event: &attention.AttentionEvent{Type: attention.NeedsInput}}})
+	app = m.(App)
+	if _, ok := app.sessionStates["gone"]; ok {
+		t.Error("closed session should not get a state")
+	}
+	if app.attentionInFlight {
+		t.Error("expected in-flight flag cleared")
+	}
+}
