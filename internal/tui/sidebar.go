@@ -5,6 +5,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -20,8 +21,8 @@ const (
 	sidebarNormal sidebarMode = iota
 	sidebarForm
 	sidebarConfirmDelete
-	sidebarPersonaSelect  // inline persona picker for existing project
-	sidebarConfirmReset   // confirmation before restarting sessions
+	sidebarPersonaSelect // inline persona picker for existing project
+	sidebarConfirmReset  // confirmation before restarting sessions
 )
 
 // Layout constants for click hit-testing.
@@ -33,16 +34,16 @@ const (
 )
 
 type sidebarModel struct {
-	projects       []config.Project
-	states         map[string]SessionState
-	openTabs       map[string]bool // tracks which projects have open tabs
-	selected       int
-	focused        bool
-	height         int
-	contentWidth   int
-	dragging       bool
-	mode           sidebarMode
-	form           formModel
+	projects             []config.Project
+	states               map[string]SessionState
+	openTabs             map[string]bool // tracks which projects have open tabs
+	selected             int
+	focused              bool
+	height               int
+	contentWidth         int
+	dragging             bool
+	mode                 sidebarMode
+	form                 formModel
 	animFrame            int // cycles 0..animFrameCount-1 for working badge breathing
 	customPersonas       []config.CustomPersona
 	personaPickerOptions []persona.PersonaOption // populated when entering sidebarPersonaSelect
@@ -218,10 +219,9 @@ func (m sidebarModel) handleKey(msg tea.KeyMsg) (sidebarModel, tea.Cmd) {
 		case isRuneKey(msg, 's'):
 			if len(m.projects) > 0 && m.selected < len(m.projects) {
 				p := m.projects[m.selected]
-				newAgent := config.AgentOpenCode
-				if p.Agent == config.AgentOpenCode {
-					newAgent = config.AgentClaudeCode
-				}
+				// Cycle to the next agent in the form's list; an unknown
+				// agent (index -1) lands on the first entry.
+				newAgent := agentTypes[(slices.Index(agentTypes, p.Agent)+1)%len(agentTypes)]
 				return m, func() tea.Msg {
 					return AgentSwitchedMsg{
 						ProjectName: p.Name,

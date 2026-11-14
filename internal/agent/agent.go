@@ -218,19 +218,6 @@ type OutputFilter interface {
 	NewOutputFilter() func(data []byte) []byte
 }
 
-// GetOutputFilter returns the OutputFilter for the given agent type, or nil
-// if the adapter does not implement one.
-func GetOutputFilter(agentType config.AgentType) OutputFilter {
-	a, err := Get(agentType)
-	if err != nil {
-		return nil
-	}
-	if f, ok := a.(OutputFilter); ok {
-		return f
-	}
-	return nil
-}
-
 // QuestionResponder is an optional interface for agents whose question dialogs
 // use selection-based navigation (arrow keys) instead of typed text input.
 // OpenCode's question dialog is a vertical list navigated with ↕ arrows;

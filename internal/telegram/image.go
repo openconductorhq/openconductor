@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openconductorhq/openconductor/internal/fsutil"
 	"github.com/openconductorhq/openconductor/internal/logging"
 )
 
@@ -206,11 +207,7 @@ func resolvePath(detected, repoDir string) string {
 	detected = strings.TrimSpace(detected)
 
 	if strings.HasPrefix(detected, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return filepath.Clean(detected) // best effort
-		}
-		return filepath.Clean(filepath.Join(home, detected[2:]))
+		return filepath.Clean(fsutil.ExpandHome(detected))
 	}
 
 	if filepath.IsAbs(detected) {

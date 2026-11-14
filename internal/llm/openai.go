@@ -21,12 +21,16 @@ type OpenAIClient struct {
 
 // NewOpenAIClient creates a new OpenAIClient configured with the given API
 // key. If model is empty, it defaults to gpt-4o-mini.
-func NewOpenAIClient(apiKey, model string) *OpenAIClient {
+func NewOpenAIClient(apiKey, model, baseURL string) *OpenAIClient {
 	m := shared.ChatModel(model)
 	if model == "" {
 		m = shared.ChatModelGPT4oMini
 	}
-	client := openai.NewClient(option.WithAPIKey(apiKey))
+	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+	client := openai.NewClient(opts...)
 	return &OpenAIClient{
 		client: client,
 		model:  m,

@@ -24,6 +24,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/openconductorhq/openconductor/internal/agent"
 	"github.com/openconductorhq/openconductor/internal/config"
 	"github.com/openconductorhq/openconductor/internal/logging"
 	"github.com/openconductorhq/openconductor/internal/session"
@@ -62,10 +63,9 @@ type Bot struct {
 	sessionNeeded SessionNeededFunc
 
 	// Health tracking (protected by mu).
-	mu sync.Mutex
+	mu              sync.Mutex
 	startedAt       time.Time // when Start() was called
 	lastPollOK      time.Time // last successful getUpdates
-	lastSendOK      time.Time // last successful sendMessage
 	consecutiveErrs int       // consecutive poll failures
 }
 
@@ -208,13 +208,6 @@ func (b *Bot) recordPollErr() {
 	}
 }
 
-// recordSendOK marks a successful outbound message.
-func (b *Bot) recordSendOK() {
-	b.mu.Lock()
-	b.lastSendOK = time.Now()
-	b.mu.Unlock()
-}
-
 // supervise runs fn in a loop with panic recovery and exponential backoff
 // restart. If fn returns normally or panics, it is restarted after a delay
 // unless the context is cancelled. name is used for logging.
@@ -243,15 +236,7 @@ func (b *Bot) supervise(name string, fn func()) {
 
 		// Unexpected exit — restart with backoff.
 		logging.Error("telegram: "+name+" exited unexpectedly, restarting", "delay", delay)
-		select {
-		case <-time.After(delay):
-		case <-b.ctx.Done():
-			return
-		}
-		delay *= 2
-		if delay > backoffMax {
-			delay = backoffMax
-		}
+		delay = b.backoff(delay) // loop top exits if ctx was cancelled
 	}
 }
 
@@ -285,11 +270,7 @@ func (b *Bot) backoff(current time.Duration) time.Duration {
 	case <-time.After(current):
 	case <-b.ctx.Done():
 	}
-	next := current * 2
-	if next > backoffMax {
-		next = backoffMax
-	}
-	return next
+	return min(current*2, backoffMax)
 }
 
 // rawUpdate is a partial Telegram Update parsed from raw JSON so we can
@@ -579,7 +560,7 @@ func (b *Bot) sendEvent(e Event) {
 		keyboard = &kb
 	case EventQuestion:
 		messages = FormatQuestion(e.Project, e.Screen)
-		options := ParseQuestionOptions(e.Screen)
+		options := agent.ParseQuestionOptions(e.Screen)
 		if len(options) > 0 {
 			kb := QuestionKeyboard(e.Project, options)
 			keyboard = &kb
@@ -613,7 +594,6 @@ func (b *Bot) sendEvent(e Event) {
 		}
 	}
 
-	b.recordSendOK()
 	logging.Debug("telegram: sent message", "project", e.Project, "kind", e.Kind, "parts", len(messages))
 }
 
@@ -765,10 +745,16 @@ func (b *Bot) rawAPICall(method string, payload map[string]interface{}) error {
 		return err
 	}
 
+	return b.postAPI(method, "application/json", bytes.NewReader(body))
+}
+
+// postAPI POSTs body to a Telegram Bot API method and checks both the HTTP
+// status and the {"ok": false} envelope.
+func (b *Bot) postAPI(method, contentType string, body io.Reader) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/%s", url.PathEscape(b.token), method)
-	resp, err := http.Post(apiURL, "application/json", bytes.NewReader(body))
+	resp, err := http.Post(apiURL, contentType, body) //nolint:gosec // URL is constructed from trusted token
 	if err != nil {
-		return err
+		return fmt.Errorf("API %s: %w", method, err)
 	}
 	defer resp.Body.Close()
 
@@ -825,54 +811,27 @@ func (b *Bot) rawMultipartCall(method string, fields map[string]string, fileFiel
 		return fmt.Errorf("close multipart writer: %w", err)
 	}
 
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/%s", url.PathEscape(b.token), method)
-	resp, err := http.Post(apiURL, writer.FormDataContentType(), &buf) //nolint:gosec // URL is constructed from trusted token
-	if err != nil {
-		return fmt.Errorf("API %s: %w", method, err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("API %s: read body: %w", method, err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("API %s returned %d: %s", method, resp.StatusCode, string(respBody))
-	}
-
-	// Telegram can return HTTP 200 with {"ok": false} for some errors.
-	var result struct {
-		OK          bool   `json:"ok"`
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(respBody, &result); err == nil && !result.OK {
-		return fmt.Errorf("API %s: %s", method, result.Description)
-	}
-
-	return nil
+	return b.postAPI(method, writer.FormDataContentType(), &buf)
 }
 
 // sendPhotoToTopic uploads a photo to a Forum Topic via sendPhoto.
 func (b *Bot) sendPhotoToTopic(topicID int, filePath string, caption string) error {
-	fields := map[string]string{
-		"chat_id":           intToStr(int(b.cfg.ChatID)),
-		"message_thread_id": intToStr(topicID),
-		"caption":           caption,
-		"parse_mode":        "HTML",
-	}
-	return b.rawMultipartCall("sendPhoto", fields, "photo", filePath)
+	return b.sendFileToTopic("sendPhoto", "photo", topicID, filePath, caption)
 }
 
 // sendDocumentToTopic uploads a document to a Forum Topic via sendDocument.
 func (b *Bot) sendDocumentToTopic(topicID int, filePath string, caption string) error {
+	return b.sendFileToTopic("sendDocument", "document", topicID, filePath, caption)
+}
+
+func (b *Bot) sendFileToTopic(method, fileField string, topicID int, filePath, caption string) error {
 	fields := map[string]string{
-		"chat_id":           intToStr(int(b.cfg.ChatID)),
-		"message_thread_id": intToStr(topicID),
+		"chat_id":           strconv.FormatInt(b.cfg.ChatID, 10),
+		"message_thread_id": strconv.Itoa(topicID),
 		"caption":           caption,
 		"parse_mode":        "HTML",
 	}
-	return b.rawMultipartCall("sendDocument", fields, "document", filePath)
+	return b.rawMultipartCall(method, fields, fileField, filePath)
 }
 
 // handleCallback processes a callback query using the handler for routing
@@ -907,9 +866,4 @@ func FormatCallbackData(kind string, project string, action string) string {
 		data = kind + ":" + project[:maxProj] + ":" + action
 	}
 	return data
-}
-
-// intToStr is a helper for payload building.
-func intToStr(i int) string {
-	return strconv.Itoa(i)
 }

@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"text/template"
+
+	"github.com/openconductorhq/openconductor/internal/config"
 )
 
 //go:embed templates/*
@@ -22,9 +24,9 @@ type TemplateData struct {
 }
 
 // Bootstrap initializes agent-specific configuration files in the given
-// repository path. The agentType selects which set of files to create:
-// "claude-code", "codex", or "gemini". Existing files are never overwritten.
-func Bootstrap(repoPath string, agentType string) error {
+// repository path. Only Claude Code is supported (CLAUDE.md + .mcp.json).
+// Existing files are never overwritten.
+func Bootstrap(repoPath string, agentType config.AgentType) error {
 	absPath, err := filepath.Abs(repoPath)
 	if err != nil {
 		return fmt.Errorf("resolving repo path: %w", err)
@@ -45,7 +47,7 @@ func Bootstrap(repoPath string, agentType string) error {
 	}
 
 	switch agentType {
-	case "claude-code":
+	case config.AgentClaudeCode:
 		if err := renderTemplate("templates/claude_md.tmpl", filepath.Join(absPath, "CLAUDE.md"), data); err != nil {
 			return err
 		}
@@ -53,7 +55,7 @@ func Bootstrap(repoPath string, agentType string) error {
 			return err
 		}
 	default:
-		return fmt.Errorf("unknown agent type: %q (supported: claude-code, opencode)", agentType)
+		return fmt.Errorf("unknown agent type: %q (supported: claude-code)", agentType)
 	}
 
 	return nil

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/openconductorhq/openconductor/internal/config"
+	"github.com/openconductorhq/openconductor/internal/fsutil"
 	"github.com/openconductorhq/openconductor/internal/logging"
 )
 
@@ -111,7 +112,7 @@ func handleNoFile(filePath string, personaText string) error {
 		return nil
 	}
 	content := buildMarkedSection(personaText)
-	return atomicWrite(filePath, []byte(content), 0o644)
+	return fsutil.AtomicWrite(filePath, []byte(content), 0o644)
 }
 
 // handleRemoval removes the managed persona section from the file. If the
@@ -135,7 +136,7 @@ func handleRemoval(filePath string, lines []string, startIdx, endIdx int) error 
 	if result == "" {
 		return os.Remove(filePath)
 	}
-	return atomicWrite(filePath, []byte(result+"\n"), 0o644)
+	return fsutil.AtomicWrite(filePath, []byte(result+"\n"), 0o644)
 }
 
 // handleReplace replaces the existing managed section (between markers) with
@@ -161,7 +162,7 @@ func handleReplace(filePath string, lines []string, startIdx, endIdx int, person
 		}
 	}
 
-	return atomicWrite(filePath, []byte(b.String()), 0o644)
+	return fsutil.AtomicWrite(filePath, []byte(b.String()), 0o644)
 }
 
 // handleAppend appends a new persona section to the end of an existing file.
@@ -174,43 +175,5 @@ func handleAppend(filePath string, existing string, personaText string) error {
 	b.WriteByte('\n')
 	b.WriteString(buildMarkedSection(personaText))
 
-	return atomicWrite(filePath, []byte(b.String()), 0o644)
-}
-
-// atomicWrite writes content to path atomically by writing to a temp file in
-// the same directory and renaming it into place. This prevents partial writes
-// from corrupting the target file.
-func atomicWrite(path string, content []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".persona-*")
-	if err != nil {
-		return fmt.Errorf("persona: creating temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-
-	// Deferred cleanup removes the temp file on any error path. On success,
-	// tmpPath is cleared so the deferred remove is a no-op.
-	defer func() {
-		if tmpPath != "" {
-			os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err := tmp.Write(content); err != nil {
-		tmp.Close()
-		return fmt.Errorf("persona: writing temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("persona: closing temp file: %w", err)
-	}
-	if err := os.Chmod(tmpPath, perm); err != nil {
-		return fmt.Errorf("persona: setting permissions: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("persona: renaming temp file: %w", err)
-	}
-
-	// Success -- prevent deferred cleanup.
-	tmpPath = ""
-	return nil
+	return fsutil.AtomicWrite(filePath, []byte(b.String()), 0o644)
 }

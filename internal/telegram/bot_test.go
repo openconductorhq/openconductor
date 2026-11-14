@@ -17,7 +17,7 @@ func TestHealthy_InitialState(t *testing.T) {
 	b := &Bot{}
 	// A fresh bot with no errors and no polls should be healthy (both times
 	// are zero, so the "never polled for > 1 minute" check doesn't fire
-	// because lastSendOK is also zero).
+	// because lastPollOK is also zero).
 	if !b.IsHealthy() {
 		t.Error("expected fresh bot to be healthy")
 	}
@@ -51,18 +51,6 @@ func TestHealthy_ErrorCounterResets(t *testing.T) {
 	b.recordPollOK()
 	if !b.IsHealthy() {
 		t.Error("expected healthy after poll OK reset")
-	}
-}
-
-func TestRecordSendOK_SetsTime(t *testing.T) {
-	b := &Bot{}
-	before := time.Now()
-	b.recordSendOK()
-	b.mu.Lock()
-	ts := b.lastSendOK
-	b.mu.Unlock()
-	if ts.Before(before) {
-		t.Error("expected lastSendOK to be set to now or later")
 	}
 }
 
@@ -235,7 +223,6 @@ func TestHealth_ConcurrentAccess(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			b.recordSendOK()
 			_ = b.IsHealthy()
 		}()
 	}

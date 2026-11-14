@@ -45,11 +45,11 @@ internal/
   session/                PTY lifecycle, vt10x state, scroll-off capture
     session.go            Session struct, ReadLoop, captureScrollOff, GetScreenLines
     manager.go            Session lifecycle management, InjectSession
+    scrollback.go         Per-session ring buffer (Push with dedup, PushForce without), CheckScrollback
   tui/                    Bubble Tea app
-    app.go                Main model: tabs, attention loop, scrollback, keyboard/mouse
+    app.go                Main model: tabs, attention loop, scroll offsets, keyboard/mouse
     terminal.go           vt10x rendering, text selection, scrollback views
     sidebar.go            Project list, status badges, forms, drag-to-resize
-    scrollback.go         Ring buffer (Push with dedup, PushForce without)
     statusbar.go          Summary bar with context-sensitive keybinding hints
     messages.go           Message types and SessionState enum
     styles.go             Colors and layout constants
@@ -70,7 +70,7 @@ internal/
 - **Attention detection**: L1 heuristics run every 500ms. Uncertain results escalate to L2 (LLM classifier), throttled to 1 call per 5s with exponential backoff. Six states: working, needs input, needs permission, asking, error, done.
 - **Scrollback capture**: Two strategies based on session type:
   - **Non-alt-screen (Claude Code)**: `session.Session.captureScrollOff()` runs per `VT.Write()`, detecting scroll shifts by comparing before/after snapshots. Lines are pushed with `PushForce` (no dedup) to preserve legitimate duplicate content (tables, blank separators).
-  - **Alt-screen (OpenCode)**: Snapshot-based detection with buffer-wide dedup to prevent TUI repaint flooding. `pushAltScreenDiff` captures disappeared content.
+  - **Alt-screen (OpenCode)**: Snapshot-based detection in `Session.CheckScrollback` with buffer-wide dedup to prevent TUI repaint flooding. `pushAltScreenDiff` captures disappeared content.
 - **Text selection**: `terminalModel` tracks mouse drag state. When the child process doesn't request mouse tracking, the TUI handles click-and-drag with reverse-video highlighting and auto-copies to clipboard.
 
 ## Code conventions
@@ -95,6 +95,17 @@ go test ./internal/attention/... # attention detection tests
 go test ./internal/config/...    # config loading tests
 go test ./internal/permission/...# permission classification tests
 ```
+
+End-to-end (real openconductor + real agents in tmux, sandboxed from your config):
+
+```bash
+scripts/e2e.sh start              # build, sandbox, launch (cc = Claude Code, oc = OpenCode)
+scripts/e2e.sh keys 'CMD: go version' Enter   # OpenCode's mock model runs that command
+scripts/e2e.sh screen             # print the screen
+scripts/e2e.sh stop
+```
+
+OpenCode and the L2 classifier talk to `scripts/e2e-mock-llm.py` (no tokens; `CMD:`/`TOOL:` messages become tool calls). Claude Code uses your real login on Haiku. `E2E_LLM=1 MOCK_DELAY=6` enables a slow L2 classifier.
 
 ## Common tasks
 

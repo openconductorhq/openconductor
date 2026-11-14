@@ -12,13 +12,18 @@ import (
 
 // bashSafeCommands is the set of shell commands considered low-risk.
 // This list is used by both L1 pattern matching and the L2 classifier prompt.
+// Commands that run arbitrary inline code (python -c, node -e, env CMD,
+// source, find -exec/-delete) are deliberately absent.
 var bashSafeCommands = []string{
-	"git", "ls", "cat", "head", "tail", "grep", "find",
-	"npm", "yarn", "pnpm", "node",
-	"go", "cargo", "pip", "pip3", "pytest", "python", "python3",
-	"ruby", "java", "make", "echo", "pwd", "mkdir", "which",
-	"env", "printenv", "source", "export",
+	"git", "ls", "cat", "head", "tail", "grep",
+	"npm", "yarn", "pnpm",
+	"go", "cargo", "pip", "pip3", "pytest",
+	"make", "echo", "pwd", "mkdir", "which", "printenv",
 }
+
+// shellMeta are characters that chain, redirect or substitute commands. A
+// command containing any of them is never BashSafe, whatever its first word.
+const shellMeta = ";&|`$<>"
 
 // BashSafeCommandSet returns the bash-safe command list as a set for O(1) lookup.
 func BashSafeCommandSet() map[string]bool {
@@ -90,7 +95,23 @@ var claudeCodePatterns = []patternRule{
 //   "HTTP request ..."               → Network
 //   "mcp_<tool> ..."                 → MCPTools
 
+// OpenCode 1.18 (captured from real dialogs) uses a different layout:
+//
+//   △ Permission required
+//     # Shell command          → BashAny, command on the "$ ..." line below
+//     → Edit main.go           → FileEdit (also used for new files)
+//     % WebFetch https://...   → Network
+//     ✱ Glob "*.txt"           → FileRead
+//   Allow once   Allow always   Reject
+
 var openCodePatterns = []patternRule{
+	// OpenCode 1.18 dialog headings.
+	{regexp.MustCompile(`#\s*Shell command\b`), BashAny},
+	{regexp.MustCompile(`→\s*Edit\s`), FileEdit},
+	{regexp.MustCompile(`→\s*(Write|Create)\s`), FileCreate},
+	{regexp.MustCompile(`→\s*Read\s`), FileRead},
+	{regexp.MustCompile(`%\s*WebFetch\s`), Network},
+	{regexp.MustCompile(`✱\s*Glob\s`), FileRead},
 	// Action description lines — the "←" arrow prefix is the key signal.
 	// U+2190 "←" is matched as a literal rune; the (?i) flag covers the verb.
 	{regexp.MustCompile(`←\s*(?i)(read|view)\s`), FileRead},
@@ -123,20 +144,35 @@ var genericPatterns = []patternRule{
 //
 // For BashAny matches, the function inspects the command name to decide whether
 // it should be downgraded to BashSafe.
+//
+// Lines are scanned bottom-up: the active dialog is at the bottom of the
+// screen, so conversation text or an old dialog above it must not decide
+// the category.
 func TryMatch(agentType config.AgentType, lines []string) *ParsedPermission {
 	rules := rulesFor(agentType)
-	text := strings.Join(lines, "\n")
+	if agentType == config.AgentOpenCode {
+		// Only the dialog counts: everything below its title.
+		for i := len(lines) - 1; i >= 0; i-- {
+			if strings.Contains(lines[i], "Permission required") {
+				lines = lines[i:]
+				break
+			}
+		}
+	}
 
-	for _, rule := range rules {
-		if rule.re.MatchString(text) {
+	for i := len(lines) - 1; i >= 0; i-- {
+		for _, rule := range rules {
+			if !rule.re.MatchString(lines[i]) {
+				continue
+			}
 			cat := rule.category
 			// Refine BashAny → BashSafe if the command is on the safe list.
 			if cat == BashAny {
-				cat = refineBashCategory(text)
+				cat = refineBashCategory(strings.Join(lines[i:], "\n"))
 			}
 			return &ParsedPermission{
 				Category:    cat,
-				Description: extractDescription(text),
+				Description: extractDescription(strings.Join(lines, "\n")),
 				Confidence:  1.0,
 				Source:      "pattern",
 			}
@@ -158,9 +194,22 @@ func rulesFor(agentType config.AgentType) []patternRule {
 	}
 }
 
-// refineBashCategory inspects the terminal text for the actual command name
-// being executed and returns BashSafe if it is on the safe list, otherwise
-// BashAny.
+// bashCmdPatterns are tried in order: most specific wins.
+// Each captures the first meaningful token after the keyword.
+var bashCmdPatterns = []*regexp.Regexp{
+	// OpenCode 1.18: the command on its own "$ git status" line.
+	regexp.MustCompile(`(?m)^[\s┃│]*\$\s+(\w+)`),
+	// OpenCode: "← Execute command npm install" / "← Run command git status"
+	regexp.MustCompile(`(?i)(?:execute|run)\s+command\s+(\w+)`),
+	// Claude Code: "Allow running bash command: git status"
+	regexp.MustCompile(`(?i)command:\s+(\w+)`),
+	regexp.MustCompile(`(?i)bash:\s+(\w+)`),
+	regexp.MustCompile(`(?i)running\s+(\w+)`),
+}
+
+// refineBashCategory inspects the dialog text for the actual command name
+// being executed and returns BashSafe if it is on the safe list and the
+// command contains no shell metacharacters, otherwise BashAny.
 //
 // It tries patterns in priority order — most specific first — so that
 // "Allow running bash command: git status" resolves to "git" (via
@@ -168,28 +217,17 @@ func rulesFor(agentType config.AgentType) []patternRule {
 func refineBashCategory(text string) Category {
 	safe := BashSafeCommandSet()
 
-	// Patterns tried in order: most specific wins.
-	// Each captures the first meaningful token after the keyword.
-	cmdPatterns := []*regexp.Regexp{
-		// OpenCode: "← Execute command npm install" / "← Run command git status"
-		regexp.MustCompile(`(?i)(?:execute|run)\s+command\s+(\w+)`),
-		// Claude Code: "Allow running bash command: git status"
-		regexp.MustCompile(`(?i)command:\s+(\w+)`),
-		regexp.MustCompile(`(?i)bash:\s+(\w+)`),
-		regexp.MustCompile(`(?i)running\s+(\w+)`),
-	}
-
-	for _, re := range cmdPatterns {
-		m := re.FindStringSubmatch(text)
-		if len(m) < 2 {
+	for _, re := range bashCmdPatterns {
+		m := re.FindStringSubmatchIndex(text)
+		if m == nil {
 			continue
 		}
-		cmd := strings.ToLower(m[1])
+		cmd := strings.ToLower(text[m[2]:m[3]])
 		// Skip shell names — they are the executor, not the command.
 		if cmd == "bash" || cmd == "sh" || cmd == "zsh" || cmd == "fish" {
 			continue
 		}
-		if safe[cmd] {
+		if safe[cmd] && !strings.ContainsAny(text[m[2]:], shellMeta) {
 			return BashSafe
 		}
 		return BashAny

@@ -101,4 +101,9 @@ type AttentionEvent struct {
 	// ImagePaths contains file paths to images the agent created or referenced,
 	// extracted by the L2 LLM classifier. Empty for L1 heuristic events.
 	ImagePaths []string
+	// AutoKeystroke, when set, tells the caller to write these bytes to the
+	// PTY and treat the session as working without notifying the user. Used
+	// for dialogs that only need confirming (e.g. a question review screen
+	// whose answers were already given).
+	AutoKeystroke []byte
 }

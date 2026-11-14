@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -96,7 +98,6 @@ type App struct {
 	sidebarWidth  int                     // content width of sidebar (excludes padding/border)
 	dragging      bool                    // true during separator drag
 	openTabs      []string                // session IDs of opened tabs, in visit order
-	visibleTabs   []int                   // indices into openTabs that are currently rendered (subset when overflow)
 	tabProjects   map[string]string       // session ID → project name (survives mgr.Close)
 	tabLabels     map[string]string       // custom display labels per session ID (empty = use session ID)
 	sessionStates map[string]SessionState // per-session state, keyed by session ID
@@ -130,6 +131,11 @@ type App struct {
 	// auto-approve is bypassed so the normal Telegram notification fires.
 	autoApproveRuns map[string]int
 
+	// attentionInFlight is true while a detectAttention command is running.
+	// Ticks are skipped until it reports back so slow L2 LLM calls never
+	// pile up or run concurrently.
+	attentionInFlight bool
+
 	// animFrame cycles 0..animFrameCount-1 every AnimTickMsg (~600ms) to
 	// drive the working badge breathing animation.
 	animFrame int
@@ -142,19 +148,6 @@ type App struct {
 	// in the status bar. Cleared on the next non-Ctrl+C key or after
 	// the window expires.
 	ctrlCHint bool
-
-	// scrollbacks maps project names to their scrollback buffers.
-	// Each session gets its own buffer so scrollback is preserved
-	// when switching between tabs.
-	scrollbacks map[string]*scrollbackBuffer
-
-	// scrollSnapshots stores the last-known screen per project (text for
-	// shift detection, glyphs for scrollback capture). The scroll-check
-	// tick compares the current VT screen against these to detect lines
-	// that scrolled off. This decouples detection from individual PTY
-	// writes (which arrive in arbitrary chunks).
-	scrollSnapshots      map[string][]string
-	scrollGlyphSnapshots map[string][]scrollbackLine
 
 	// scrollDirty tracks which projects received new PTY output since
 	// the last scroll check. Only dirty projects are checked on tick.
@@ -247,31 +240,28 @@ func NewApp(cfg *config.Config, configPath string, restoredState *config.AppStat
 	tabBarH := strings.Count(sampleTab, "\n") + 1
 
 	return App{
-		cfg:                  cfg,
-		configPath:           configPath,
-		sidebar:              sidebar,
-		terminal:             newTerminalModel(),
-		statusbar:            newStatusBarModel(cfg.Projects),
-		focus:                initialFocus,
-		active:               activeIdx,
-		mgr:                  session.NewManager(),
-		detector:             attention.NewDetector(),
-		sidebarWidth:         defaultSidebarWidth,
-		openTabs:             openTabs,
-		tabProjects:          make(map[string]string),
-		tabLabels:            tabLabels,
-		editingTab:           -1,
-		sessionStates:        make(map[string]SessionState),
-		stateStickUntil:      make(map[string]time.Time),
-		autoApproveRuns:      make(map[string]int),
-		scrollbacks:          make(map[string]*scrollbackBuffer),
-		scrollSnapshots:      make(map[string][]string),
-		scrollGlyphSnapshots: make(map[string][]scrollbackLine),
-		scrollDirty:          make(map[string]bool),
-		scrollOffsets:        make(map[string]int),
-		scrollPinned:         make(map[string]bool),
-		pendingRestoreTabs:   openTabs,
-		tabBarHeight:         tabBarH,
+		cfg:                cfg,
+		configPath:         configPath,
+		sidebar:            sidebar,
+		terminal:           newTerminalModel(),
+		statusbar:          newStatusBarModel(cfg.Projects),
+		focus:              initialFocus,
+		active:             activeIdx,
+		mgr:                session.NewManager(),
+		detector:           attention.NewDetector(),
+		sidebarWidth:       defaultSidebarWidth,
+		openTabs:           openTabs,
+		tabProjects:        make(map[string]string),
+		tabLabels:          tabLabels,
+		editingTab:         -1,
+		sessionStates:      make(map[string]SessionState),
+		stateStickUntil:    make(map[string]time.Time),
+		autoApproveRuns:    make(map[string]int),
+		scrollDirty:        make(map[string]bool),
+		scrollOffsets:      make(map[string]int),
+		scrollPinned:       make(map[string]bool),
+		pendingRestoreTabs: openTabs,
+		tabBarHeight:       tabBarH,
 	}
 }
 
@@ -427,8 +417,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Start a session for each restored tab, resuming the previous
 			// conversation (--continue for OpenCode).
 			for _, name := range a.pendingRestoreTabs {
-				if p, ok := a.projectByName(name); ok {
-					cmds = append(cmds, a.startSessionCmd(p, true))
+				if i := a.projectIndexByName(name); i >= 0 {
+					cmds = append(cmds, a.startSessionCmd(a.cfg.Projects[i], true))
 				}
 			}
 			a.pendingRestoreTabs = nil
@@ -460,7 +450,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !a.lastCtrlC.IsZero() && now.Sub(a.lastCtrlC) < ctrlCWindow {
 				a.saveState()
 				a.mgr.Close()
-				a.terminal.Close()
 				return a, tea.Quit
 			}
 			a.lastCtrlC = now
@@ -1088,15 +1077,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case historyLoadedMsg:
-		if len(msg.Lines) > 0 {
-			sb := a.scrollbacks[msg.SessionID]
-			if sb == nil {
-				sb = newScrollbackBuffer(defaultScrollbackCapacity)
-				a.scrollbacks[msg.SessionID] = sb
-			}
+		if s := a.mgr.GetSession(msg.SessionID); s != nil && len(msg.Lines) > 0 {
+			sb := s.Scrollback()
 			for _, line := range msg.Lines {
-				glyphs := textToGlyphs(line)
-				sb.Push(glyphs)
+				sb.Push(session.TextToGlyphs(line))
 			}
 			logging.Info("scrollback: pre-populated history",
 				"session", msg.SessionID,
@@ -1298,10 +1282,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case TickMsg:
-		// Run attention detection on the active session.
-		a.checkAttention()
+		// Attention detection (which may call an LLM) runs off the UI
+		// thread; results come back as attentionResultsMsg.
+		if !a.attentionInFlight {
+			if cmd := a.detectAttentionCmd(); cmd != nil {
+				a.attentionInFlight = true
+				cmds = append(cmds, cmd)
+			}
+		}
 		cmds = append(cmds, tickCmd())
 		return a, tea.Batch(cmds...)
+
+	case attentionResultsMsg:
+		a.attentionInFlight = false
+		a.applyAttention(msg)
+		return a, nil
 	}
 
 	return a, tea.Batch(cmds...)
@@ -1398,11 +1393,25 @@ func (a *App) toggleFocus() {
 	}
 }
 
-// inactiveTabStyle returns the style for an inactive tab. All inactive tabs
-// use the same subtle charcoal border for visual consistency — the badge
-// character (◆ ● ! ? ✓) already communicates session state.
-func inactiveTabStyle(_ SessionState) lipgloss.Style {
-	return tabStyle
+// renderTab renders the tab at index i in openTabs. Shared by tabBarView and
+// tabHitTest so hit-testing always matches what is drawn. All inactive tabs
+// use the same subtle style — the badge character communicates state.
+func (a App) renderTab(i int) string {
+	sessionID := a.openTabs[i]
+	char := badgeChar(a.sessionStates[sessionID], a.animFrame)
+
+	var label string
+	if i == a.editingTab {
+		// Editing: show buffer with cursor.
+		label = char + " " + a.tabEditBuf + "▏ ✕"
+	} else {
+		label = char + " " + a.tabDisplayName(sessionID) + " ✕"
+	}
+
+	if sessionID == a.mgr.ActiveName() {
+		return tabActiveStyle.Render(label)
+	}
+	return tabStyle.Render(label)
 }
 
 // tabBarView renders the tab bar using the lipgloss border technique.
@@ -1415,95 +1424,13 @@ func (a App) tabBarView() string {
 	sbWidth := a.sidebar.Width()
 	panelWidth := a.innerWidth() - sbWidth
 
-	activeSessionID := a.mgr.ActiveName()
-
-	// Render each tab as a bordered box. All tabs show a close button ✕.
-	var renderedTabs []string
-	for i, sessionID := range a.openTabs {
-		state := a.sessionStates[sessionID]
-		char := badgeChar(state, a.animFrame)
-		displayName := a.tabDisplayName(sessionID)
-
-		var label string
-		if i == a.editingTab {
-			// Editing: show buffer with cursor.
-			label = char + " " + a.tabEditBuf + "▏ ✕"
-		} else {
-			label = char + " " + displayName + " ✕"
-		}
-
-		if sessionID == activeSessionID {
-			renderedTabs = append(renderedTabs, tabActiveStyle.Render(label))
-		} else {
-			renderedTabs = append(renderedTabs, inactiveTabStyle(state).Render(label))
-		}
+	// Show only the tabs that fit, always including the active one. This
+	// prevents overflow that breaks layout and mouse coordinates.
+	var shown []string
+	for _, i := range a.visibleTabIndices() {
+		shown = append(shown, a.renderTab(i))
 	}
-
-	// Join tabs side by side (aligned at top). If the total width
-	// exceeds the panel, show only tabs that fit — always including
-	// the active tab. This prevents overflow that breaks layout and
-	// mouse coordinate calculations on terminal resize.
-	var row string
-	a.visibleTabs = nil
-	if len(renderedTabs) > 0 {
-		totalWidth := 0
-		for _, t := range renderedTabs {
-			totalWidth += lipgloss.Width(t)
-		}
-
-		if totalWidth <= panelWidth {
-			// Everything fits — all tabs visible.
-			row = lipgloss.JoinHorizontal(lipgloss.Top, renderedTabs...)
-			for i := range renderedTabs {
-				a.visibleTabs = append(a.visibleTabs, i)
-			}
-		} else {
-			// Overflow — find the active tab index, then greedily
-			// include tabs around it until the panel is full.
-			activeIdx := 0
-			for i, sid := range a.openTabs {
-				if sid == activeSessionID {
-					activeIdx = i
-					break
-				}
-			}
-
-			visible := []int{activeIdx}
-			usedWidth := lipgloss.Width(renderedTabs[activeIdx])
-
-			// Expand outward from the active tab.
-			lo, hi := activeIdx-1, activeIdx+1
-			for lo >= 0 || hi < len(renderedTabs) {
-				if lo >= 0 {
-					w := lipgloss.Width(renderedTabs[lo])
-					if usedWidth+w <= panelWidth {
-						visible = append([]int{lo}, visible...)
-						usedWidth += w
-						lo--
-					} else {
-						lo = -1
-					}
-				}
-				if hi < len(renderedTabs) {
-					w := lipgloss.Width(renderedTabs[hi])
-					if usedWidth+w <= panelWidth {
-						visible = append(visible, hi)
-						usedWidth += w
-						hi++
-					} else {
-						hi = len(renderedTabs)
-					}
-				}
-			}
-
-			a.visibleTabs = visible
-			var shownTabs []string
-			for _, idx := range visible {
-				shownTabs = append(shownTabs, renderedTabs[idx])
-			}
-			row = lipgloss.JoinHorizontal(lipgloss.Top, shownTabs...)
-		}
-	}
+	row := lipgloss.JoinHorizontal(lipgloss.Top, shown...)
 
 	// Fill remaining width with ─ border (the gap).
 	rowWidth := lipgloss.Width(row)
@@ -1520,6 +1447,52 @@ func (a App) tabBarView() string {
 	// No tabs: pad gap to 3 lines for consistent layout.
 	blank := strings.Repeat(" ", panelWidth)
 	return blank + "\n" + gap
+}
+
+// visibleTabIndices returns the openTabs indices drawn in the tab bar, in
+// order. When all tabs don't fit, tabs are added outward from the active
+// tab until the panel is full. Shared by tabBarView and tabHitTest so clicks
+// map to what is drawn.
+func (a App) visibleTabIndices() []int {
+	if len(a.openTabs) == 0 {
+		return nil
+	}
+	panelWidth := a.innerWidth() - a.sidebar.Width()
+	widths := make([]int, len(a.openTabs))
+	total := 0
+	for i := range a.openTabs {
+		widths[i] = lipgloss.Width(a.renderTab(i))
+		total += widths[i]
+	}
+	if total <= panelWidth {
+		all := make([]int, len(a.openTabs))
+		for i := range all {
+			all[i] = i
+		}
+		return all
+	}
+
+	activeIdx := max(slices.Index(a.openTabs, a.mgr.ActiveName()), 0)
+	lo, hi := activeIdx, activeIdx+1 // visible = [lo, hi)
+	used := widths[activeIdx]
+	for grew := true; grew; {
+		grew = false
+		if lo > 0 && used+widths[lo-1] <= panelWidth {
+			lo--
+			used += widths[lo]
+			grew = true
+		}
+		if hi < len(widths) && used+widths[hi] <= panelWidth {
+			used += widths[hi]
+			hi++
+			grew = true
+		}
+	}
+	out := make([]int, 0, hi-lo)
+	for i := lo; i < hi; i++ {
+		out = append(out, i)
+	}
+	return out
 }
 
 func (a *App) layout() {
@@ -1666,19 +1639,33 @@ func (a *App) syncTerminalFromSession() {
 		return
 	}
 
-	vt, w, h := s.GetVT()
-
-	// Check alt-screen mode while we have the VT reference.
+	// One read lock for VT, size and alt-screen mode (this runs on every
+	// output chunk of the active session).
 	s.Mu.RLock()
-	alt := s.VT != nil && s.VT.Mode()&vt10x.ModeAltScreen != 0
+	vt, w, h := s.VT, s.Width, s.Height
+	alt := vt != nil && vt.Mode()&vt10x.ModeAltScreen != 0
 	s.Mu.RUnlock()
 
-	a.terminal.mu.Lock()
+	// The terminal reads the session's VT, so it must hold the lock the
+	// session's ReadLoop writes under. Its own fields are UI-thread only.
+	a.terminal.mu = &s.Mu
 
-	// Save the outgoing session's scroll state before overwriting.
-	if prev := a.terminal.sessionID; prev != "" && prev != s.ID {
-		a.scrollOffsets[prev] = a.terminal.scrollOffset
-		a.scrollPinned[prev] = a.terminal.scrollPinned
+	// This also runs on every output chunk of the active session, so
+	// selection and scroll state change only on an actual switch.
+	switched := a.terminal.sessionID != s.ID
+	if switched {
+		// Save the outgoing session's scroll state, restore the incoming one's.
+		if prev := a.terminal.sessionID; prev != "" {
+			a.scrollOffsets[prev] = a.terminal.scrollOffset
+			a.scrollPinned[prev] = a.terminal.scrollPinned
+		}
+		a.terminal.scrollOffset = a.scrollOffsets[s.ID]
+		a.terminal.scrollPinned = a.scrollPinned[s.ID]
+	}
+	if switched || a.terminal.vt != vt {
+		// A selection belongs to the screen it was made on.
+		a.terminal.selActive = false
+		a.terminal.hasSelection = false
 	}
 
 	a.terminal.vt = vt
@@ -1688,24 +1675,7 @@ func (a *App) syncTerminalFromSession() {
 	a.terminal.altScreen = alt
 	a.terminal.sessionID = s.ID
 
-	// Clear any in-app text selection from the previous session.
-	a.terminal.selActive = false
-	a.terminal.hasSelection = false
-
-	// Restore the incoming session's scroll state.
-	a.terminal.scrollOffset = a.scrollOffsets[s.ID]
-	a.terminal.scrollPinned = a.scrollPinned[s.ID]
-
-	a.terminal.mu.Unlock()
-
-	// Point the terminal at this session's scrollback buffer.
-	id := s.ID
-	sb := a.scrollbacks[id]
-	if sb == nil {
-		sb = newScrollbackBuffer(defaultScrollbackCapacity)
-		a.scrollbacks[id] = sb
-	}
-	a.terminal.scrollback = sb
+	a.terminal.scrollback = s.Scrollback()
 }
 
 // runScrollCheck iterates over dirty projects and compares the current VT
@@ -1724,7 +1694,7 @@ func (a *App) runScrollCheck() {
 			continue
 		}
 
-		pushed := a.checkScrollback(s, sessionID)
+		pushed := s.CheckScrollback()
 
 		// If the user is scrolled up AND pinned (scrolled up into history,
 		// not scrolling back down), bump the offset so the view stays on
@@ -1742,249 +1712,11 @@ func (a *App) runScrollCheck() {
 	}
 }
 
-// checkScrollback detects lines that scrolled off the terminal viewport and
-// pushes them to the session's scrollback buffer. Returns the number of
-// lines pushed.
-//
-// Two detection strategies are used:
-//
-// 1. Session.captureScrollOff (non-alt-screen only): runs synchronously on
-//    every VT.Write() and reliably catches all scroll events. When captures
-//    are found, they are pushed with PushForce (no buffer-wide dedup) so that
-//    legitimate duplicate content — repeated table rows, code patterns, blank
-//    separator lines — is preserved exactly as it appeared. Snapshot-based
-//    detection is skipped to avoid dual-detection duplicates.
-//
-// 2. Snapshot-based detection (fallback): compares the current VT screen
-//    against the stored snapshot to detect scroll shifts or TUI repaints.
-//    Uses buffer-wide dedup (Push) to prevent flooding from alt-screen TUI
-//    apps that repaint every ~100ms.
-func (a *App) checkScrollback(s *session.Session, sessionID string) int {
-	sb := a.scrollbacks[sessionID]
-	if sb == nil {
-		sb = newScrollbackBuffer(defaultScrollbackCapacity)
-		a.scrollbacks[sessionID] = sb
-	}
-
-	s.Mu.RLock()
-	defer s.Mu.RUnlock()
-
-	if s.VT == nil {
-		return 0
-	}
-
-	w, h := s.Width, s.Height
-	altScreen := s.VT.Mode()&vt10x.ModeAltScreen != 0
-	isChrome := agent.GetChromeLineFilter(s.Project.Agent)
-
-	// ── Session-level captures (non-alt-screen only) ────────────────
-	//
-	// captureScrollOff runs per VT.Write() and catches every scroll event
-	// synchronously. When captures exist, use PushForce (no buffer-wide
-	// dedup) to preserve legitimate duplicate content (tables, code blocks,
-	// blank separator lines). Skip snapshot-based detection to avoid
-	// pushing the same lines twice.
-	captured := s.DrainScrollCapture()
-	if !altScreen && len(captured) > 0 {
-		pushed := 0
-		for _, cl := range captured {
-			if isChrome != nil && isChrome(cl.Text) {
-				continue
-			}
-			sb.PushForce(scrollbackLine(cl.Glyphs))
-			pushed++
-		}
-		return pushed
-	}
-
-	// ── Snapshot-based detection (alt-screen or no session captures) ─
-	cursorY := s.VT.Cursor().Y
-
-	// Build current screen snapshot (text + glyphs).
-	curTexts := make([]string, h)
-	curGlyphs := make([]scrollbackLine, h)
-	for row := 0; row < h; row++ {
-		glyphs := make(scrollbackLine, w)
-		for col := 0; col < w; col++ {
-			glyphs[col] = s.VT.Cell(col, row)
-		}
-		curGlyphs[row] = glyphs
-		curTexts[row] = glyphsToText(glyphs)
-	}
-
-	oldTexts := a.scrollSnapshots[sessionID]
-	oldGlyphs := a.scrollGlyphSnapshots[sessionID]
-
-	// First snapshot — just store it, nothing to compare.
-	if oldTexts == nil {
-		a.scrollSnapshots[sessionID] = curTexts
-		a.scrollGlyphSnapshots[sessionID] = curGlyphs
-		return 0
-	}
-
-	// Push any remaining session captures (with dedup for alt-screen safety).
-	for _, cl := range captured {
-		if isChrome != nil && isChrome(cl.Text) {
-			continue
-		}
-		sb.Push(scrollbackLine(cl.Glyphs))
-	}
-	pushed := len(captured)
-
-	// Detect scroll shift between last snapshot and current screen.
-	shift := detectScrollShift(oldTexts, curTexts)
-
-	// Count how many rows actually changed between snapshots.
-	changedRows := 0
-	for i := 0; i < len(oldTexts) && i < len(curTexts); i++ {
-		if oldTexts[i] != curTexts[i] {
-			changedRows++
-		}
-	}
-	if changedRows > 3 || shift > 0 {
-		logging.Debug("scrollback: snapshot diff",
-			"session", sessionID,
-			"shift", shift,
-			"changedRows", changedRows,
-			"totalRows", h,
-			"altScreen", altScreen,
-			"cursorY", cursorY,
-		)
-	}
-
-	if shift > 0 && oldGlyphs != nil {
-		// Traditional scroll detected — push scrolled-off rows.
-		// Find the first row that changed — skip fixed headers in TUI apps.
-		firstDiff := 0
-		for firstDiff < len(oldTexts) && firstDiff < len(curTexts) && oldTexts[firstDiff] == curTexts[firstDiff] {
-			firstDiff++
-		}
-
-		end := firstDiff + shift
-		if end > len(oldGlyphs) {
-			end = len(oldGlyphs)
-		}
-
-		for i := firstDiff; i < end; i++ {
-			if isChrome != nil && isChrome(oldTexts[i]) {
-				continue
-			}
-			sb.Push(oldGlyphs[i])
-			pushed++
-		}
-	} else if shift == 0 && altScreen && oldGlyphs != nil {
-		// Alt-screen TUI app: no traditional scroll, but the screen may have
-		// been fully repainted. Push old non-blank rows that disappeared from
-		// the new screen, so the user can scroll back to see previous content.
-		chromeTop, chromeBottom := agent.ChromeSkipRows(s.Project.Agent)
-		pushed = pushAltScreenDiff(sb, oldTexts, oldGlyphs, curTexts, chromeTop, chromeBottom, isChrome)
-	} else if shift == 0 && !altScreen && oldGlyphs != nil {
-		// Non-alt-screen CLI (e.g. Claude Code): large output burst replaced
-		// the entire visible area faster than detectScrollShift's maxShift
-		// (height/2) can track. Push old rows that disappeared, but ONLY
-		// rows above the cursor position — content at/below the cursor is
-		// "active" (spinner, prompt) being updated in-place, not content
-		// that scrolled off. Without this limit, the spinner line gets
-		// pushed to scrollback on every tick because its text changes
-		// (different time counter, animation character).
-		skipBottom := h - cursorY
-		if skipBottom < 0 {
-			skipBottom = 0
-		}
-		pushed = pushAltScreenDiff(sb, oldTexts, oldGlyphs, curTexts, 0, skipBottom, isChrome)
-	}
-
-	// Store current snapshot for next comparison.
-	a.scrollSnapshots[sessionID] = curTexts
-	a.scrollGlyphSnapshots[sessionID] = curGlyphs
-	return pushed
-}
-
-// pushAltScreenDiff pushes old screen rows that are non-blank and no longer
-// present in the new screen. This captures content that disappeared during a
-// TUI app full-screen repaint. Returns the number of lines pushed.
-//
-// chromeSkipFirst and chromeSkipLast specify the number of rows to exclude from
-// the top and bottom of the screen respectively. TUI apps typically have fixed
-// chrome (header, status bar, footer) that changes frequently (timer ticks,
-// token counters) and should not be pushed to scrollback.
-//
-// To avoid flooding scrollback with identical TUI frames, a row is only pushed
-// if it:
-//   - is non-blank in the old screen
-//   - is outside the chrome skip zones
-//   - does NOT appear at the same position in the new screen
-//   - does NOT appear ANYWHERE in the new screen (dedup against full content)
-//
-// At least minAltDiffRows rows must qualify — small diffs (1-2 rows) are
-// typically just cursor blinks or status updates, not meaningful content loss.
-func pushAltScreenDiff(sb *scrollbackBuffer, oldTexts []string, oldGlyphs []scrollbackLine, curTexts []string, chromeSkipFirst, chromeSkipLast int, isChrome func(string) bool) int {
-	const minAltDiffRows = 3
-
-	// Build a set of all current screen text for dedup.
-	curSet := make(map[string]struct{}, len(curTexts))
-	for _, t := range curTexts {
-		if t != "" {
-			curSet[t] = struct{}{}
-		}
-	}
-
-	// Determine the content row range (excluding TUI chrome).
-	startRow := chromeSkipFirst
-	endRow := len(oldTexts) - chromeSkipLast
-	if startRow < 0 {
-		startRow = 0
-	}
-	if endRow > len(oldTexts) {
-		endRow = len(oldTexts)
-	}
-	if startRow >= endRow {
-		return 0
-	}
-
-	// Collect old rows that disappeared.
-	type candidate struct {
-		row    int
-		glyphs scrollbackLine
-	}
-	var candidates []candidate
-	for i := startRow; i < endRow; i++ {
-		oldText := oldTexts[i]
-		if oldText == "" {
-			continue
-		}
-		// Skip agent chrome lines (spinners, status, completion).
-		if isChrome != nil && isChrome(oldText) {
-			continue
-		}
-		// Skip if the row is unchanged at the same position.
-		if i < len(curTexts) && oldText == curTexts[i] {
-			continue
-		}
-		// Skip if the row still appears anywhere on the new screen.
-		if _, exists := curSet[oldText]; exists {
-			continue
-		}
-		candidates = append(candidates, candidate{row: i, glyphs: oldGlyphs[i]})
-	}
-
-	if len(candidates) < minAltDiffRows {
-		return 0
-	}
-
-	for _, c := range candidates {
-		sb.Push(c.glyphs)
-	}
-	return len(candidates)
-}
-
 // clearTerminal deactivates the terminal widget so it shows the empty
 // placeholder. Called when all tabs are closed and there is nothing to display.
 func (a *App) clearTerminal() {
-	a.terminal.mu.Lock()
 	a.terminal.vt = nil
 	a.terminal.active = false
-	a.terminal.mu.Unlock()
 }
 
 // clampAndSetSidebarWidth sets the sidebar content width from a mouse X
@@ -2016,43 +1748,12 @@ func (a *App) resizeAllSessions() {
 // (tabIndex, isClose). tabIndex is -1 if the click falls outside any tab.
 // isClose is true if the click landed on the close button region (✕) of any tab.
 //
-// Only visible tabs (from visibleTabs) are considered, so clicks map correctly
-// even when the tab bar is truncated due to narrow terminal width.
+// Only visible tabs are considered, so clicks map correctly even when the
+// tab bar is truncated due to narrow terminal width.
 func (a App) tabHitTest(localX int) (int, bool) {
-	activeSessionID := a.mgr.ActiveName()
-
-	// Use visibleTabs if set, otherwise fall back to all openTabs.
-	indices := a.visibleTabs
-	if len(indices) == 0 {
-		indices = make([]int, len(a.openTabs))
-		for i := range a.openTabs {
-			indices[i] = i
-		}
-	}
-
 	offset := 0
-	for _, i := range indices {
-		if i < 0 || i >= len(a.openTabs) {
-			continue
-		}
-		sessionID := a.openTabs[i]
-		state := a.sessionStates[sessionID]
-		char := badgeChar(state, a.animFrame)
-		displayName := a.tabDisplayName(sessionID)
-
-		var label string
-		if i == a.editingTab {
-			label = char + " " + a.tabEditBuf + "▏ ✕"
-		} else {
-			label = char + " " + displayName + " ✕"
-		}
-
-		var w int
-		if sessionID == activeSessionID {
-			w = lipgloss.Width(tabActiveStyle.Render(label))
-		} else {
-			w = lipgloss.Width(inactiveTabStyle(state).Render(label))
-		}
+	for _, i := range a.visibleTabIndices() {
+		w := lipgloss.Width(a.renderTab(i))
 
 		if localX >= offset && localX < offset+w {
 			closeRegionStart := offset + w - tabCloseRegion
@@ -2135,17 +1836,6 @@ func (a *App) saveState() {
 		a.stateSaved = true
 		logging.Debug("state saved", "tabs", len(tabs), "active", activeProject)
 	}
-}
-
-// projectByName returns the project with the given name and true, or a zero
-// value and false if not found.
-func (a App) projectByName(name string) (config.Project, bool) {
-	for _, p := range a.cfg.Projects {
-		if p.Name == name {
-			return p, true
-		}
-	}
-	return config.Project{}, false
 }
 
 // projectIndexByName returns the index of the project with the given name, or -1.
@@ -2246,44 +1936,113 @@ func isAttentionState(s SessionState) bool {
 	return s == StateNeedsAttention || s == StateNeedsPermission || s == StateAsking || s == StateError || s == StateDone
 }
 
-// checkAttention runs attention detection on ALL sessions (not just the
-// active one) using the L1 heuristic detector with optional L2 LLM
-// escalation. Updates sidebar/statusbar state accordingly.
-//
-// Sticky logic: when a project enters an attention state, it is held for at
-// least stateStickDuration before being downgraded back to Working. This
-// prevents visual flicker when transient signals scroll off screen between
-// ticks.
-func (a *App) checkAttention() {
-	ctx := context.Background()
-	now := time.Now()
+// markWorking sets a session to Working after the app answered a dialog on
+// the user's behalf, clearing any sticky attention state.
+func (a *App) markWorking(sessionID, projectName string) {
+	a.sessionStates[sessionID] = StateWorking
+	a.statusbar.states[sessionID] = StateWorking
+	a.sidebar.states[projectName] = a.aggregateProjectState(projectName)
+	delete(a.stateStickUntil, sessionID)
+}
 
+// attentionInput is a UI-thread snapshot of one session for detection.
+type attentionInput struct {
+	sess       *session.Session
+	sessionID  string
+	project    config.Project
+	lines      []string
+	pid        int
+	checker    attention.AttentionChecker
+	keystrokes *attention.ApprovalKeystrokes // nil when the agent is unknown
+}
+
+// attentionResult is the detection outcome for one session.
+type attentionResult struct {
+	sess      *session.Session
+	sessionID string
+	lines     []string
+	event     *attention.AttentionEvent
+	isWorking bool
+	approve   *attention.AutoApproveResult // set only for auto-approvable permission events
+}
+
+// attentionResultsMsg carries one detection pass back to Update.
+type attentionResultsMsg []attentionResult
+
+// detectAttentionCmd snapshots every session on the UI thread and returns a
+// command that runs L1 heuristics, L2 LLM escalation and auto-approve
+// classification in the background. Returns nil when there are no sessions.
+func (a *App) detectAttentionCmd() tea.Cmd {
+	var inputs []attentionInput
 	for _, s := range a.mgr.AllSessions() {
 		lines := s.GetScreenLines()
 		if lines == nil {
 			continue
 		}
-
-		sessionID := s.ID
-		projectName := s.Project.Name
-
-		// Get the process PID for liveness checking.
-		pid := 0
+		in := attentionInput{sess: s, sessionID: s.ID, project: s.Project, lines: lines}
 		if s.Cmd != nil {
-			pid = s.Cmd.Pid
+			in.pid = s.Cmd.Pid
 		}
-
-		prevState := a.sessionStates[sessionID]
-
-		// Look up the agent adapter and cast to AttentionChecker if supported.
-		var checker attention.AttentionChecker
 		if adapter, err := agent.Get(s.Project.Agent); err == nil {
 			if c, ok := adapter.(attention.AttentionChecker); ok {
-				checker = c
+				in.checker = c
+			}
+			in.keystrokes = &attention.ApprovalKeystrokes{
+				Approve:        adapter.ApproveKeystroke(),
+				ApproveSession: adapter.ApproveSessionKeystroke(),
 			}
 		}
+		inputs = append(inputs, in)
+	}
+	if len(inputs) == 0 {
+		return nil
+	}
 
-		event, isWorking := a.detector.Check(ctx, sessionID, lines, pid, checker)
+	detector, approver := a.detector, a.autoApprover
+	return func() tea.Msg {
+		ctx := context.Background()
+		// Sessions run in parallel so one slow L2 call doesn't delay the rest.
+		results := make(attentionResultsMsg, len(inputs))
+		var wg sync.WaitGroup
+		for i, in := range inputs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				event, isWorking := detector.Check(ctx, in.sessionID, in.lines, in.pid, in.checker)
+				r := attentionResult{sess: in.sess, sessionID: in.sessionID, lines: in.lines, event: event, isWorking: isWorking}
+				if event != nil && len(event.AutoKeystroke) == 0 &&
+					event.Type == attention.NeedsPermission && approver != nil && in.keystrokes != nil {
+					res := approver.CheckAndApprove(ctx, in.project, in.lines, *in.keystrokes)
+					r.approve = &res
+				}
+				results[i] = r
+			}()
+		}
+		wg.Wait()
+		return results
+	}
+}
+
+// applyAttention updates sidebar/statusbar state from a detection pass.
+//
+// Sticky logic: when a project enters an attention state, it is held for at
+// least stateStickDuration before being downgraded back to Working. This
+// prevents visual flicker when transient signals scroll off screen between
+// ticks.
+func (a *App) applyAttention(results attentionResultsMsg) {
+	now := time.Now()
+
+	for _, r := range results {
+		s := a.mgr.GetSession(r.sessionID)
+		if s == nil || s != r.sess {
+			continue // closed or restarted (IDs are reused) while detection ran
+		}
+		sessionID := s.ID
+		projectName := s.Project.Name
+		lines := r.lines
+		event, isWorking := r.event, r.isWorking
+		prevState := a.sessionStates[sessionID]
+
 		logging.Debug("attention check",
 			"session", sessionID,
 			"project", projectName,
@@ -2293,97 +2052,64 @@ func (a *App) checkAttention() {
 			"isWorking", isWorking,
 		)
 		if event != nil {
+			// Keystrokes were chosen for the snapshot screen. If it has
+			// changed since (user typed, dialog moved on), drop this result;
+			// the next pass re-detects against the current screen.
+			sendsKeys := len(event.AutoKeystroke) > 0 || (r.approve != nil && r.approve.ShouldApprove)
+			if sendsKeys && !slices.Equal(s.GetScreenLines(), lines) {
+				logging.Debug("attention: screen changed during detection, skipping keystroke", "session", sessionID)
+				continue
+			}
+
+			// Adapter-requested auto-confirm (e.g. OpenCode's "Always allow"
+			// second stage, or a question review screen whose answers were
+			// already given). Must run BEFORE auto-approve — otherwise
+			// auto-approve consumes the NeedsPermission event and sends the
+			// wrong keystroke to the confirm dialog.
+			if len(event.AutoKeystroke) > 0 {
+				s.Write(event.AutoKeystroke)
+				a.markWorking(sessionID, projectName)
+				delete(a.autoApproveRuns, sessionID)
+				logging.Info("auto-confirm",
+					"project", projectName,
+					"session", sessionID,
+					"detail", event.Detail,
+				)
+				continue
+			}
+
 			// Auto-approve permission requests when the project is configured
 			// to do so and the classifier identifies the category as allowed.
-			// Auto-confirm "Always allow" second-stage dialog. After
-			// selecting "Allow always" on a permission (via auto-approve
-			// or Telegram button), OpenCode shows a confirmation dialog
-			// with "Confirm" already highlighted. Press Enter to proceed.
-			// Must run BEFORE auto-approve — otherwise auto-approve
-			// consumes the NeedsPermission event and sends the wrong
-			// keystroke to the confirm dialog.
-			if event.Type == attention.NeedsPermission && strings.Contains(event.Detail, "auto-confirm") {
-				s.Write([]byte("\r"))
-				a.sessionStates[sessionID] = StateWorking
-				a.statusbar.states[sessionID] = StateWorking
-				a.sidebar.states[projectName] = a.aggregateProjectState(projectName)
-				delete(a.stateStickUntil, sessionID)
-				delete(a.autoApproveRuns, sessionID)
-				logging.Info("auto-confirm: confirmed always-allow dialog",
-					"project", projectName,
-					"session", sessionID,
-				)
-				continue
-			}
-
-			if event.Type == attention.NeedsPermission && a.autoApprover != nil {
-				adapter, adapterErr := agent.Get(s.Project.Agent)
-				if adapterErr == nil {
-					keystrokes := attention.ApprovalKeystrokes{
-						Approve:        adapter.ApproveKeystroke(),
-						ApproveSession: adapter.ApproveSessionKeystroke(),
-					}
-					result := a.autoApprover.CheckAndApprove(ctx, s.Project, lines, keystrokes)
-					if result.ShouldApprove {
-						a.autoApproveRuns[sessionID]++
-						if a.autoApproveRuns[sessionID] > autoApproveMaxRuns {
-							// Auto-approve has fired too many consecutive times.
-							// The dialog is stuck or permissions are queuing
-							// faster than we can dismiss. Fall through to the
-							// normal notification path so the user gets a
-							// Telegram/desktop alert.
-							logging.Info("auto-approve: stuck, falling through to notification",
-								"project", projectName,
-								"session", sessionID,
-								"runs", a.autoApproveRuns[sessionID],
-							)
-						} else {
-							// Send the approval keystroke to the PTY and treat
-							// the session as Working — no notification needed.
-							logging.Info("auto-approve: sending keystroke",
-								"project", projectName,
-								"session", sessionID,
-								"run", a.autoApproveRuns[sessionID],
-								"bytesHex", fmt.Sprintf("%x", result.Keystroke),
-								"bytesLen", len(result.Keystroke),
-							)
-							s.Write(result.Keystroke)
-							// If the keystroke is a navigation sequence (e.g.
-							// Right arrow to "Allow always"), it needs Enter
-							// to confirm the selection. Same logic as the
-							// Telegram handler's writePermKeystroke.
-							ks := result.Keystroke
-							if len(ks) > 0 && ks[len(ks)-1] != '\r' && ks[len(ks)-1] != '\n' {
-								if d := agent.GetSubmitDelay(s.Project.Agent); d > 0 {
-									time.Sleep(d)
-								}
-								s.Write([]byte("\r"))
-							}
-							a.sessionStates[sessionID] = StateWorking
-							a.statusbar.states[sessionID] = StateWorking
-							a.sidebar.states[projectName] = a.aggregateProjectState(projectName)
-							delete(a.stateStickUntil, sessionID)
-							continue
-						}
-					}
+			if result := r.approve; result != nil && result.ShouldApprove {
+				a.autoApproveRuns[sessionID]++
+				if a.autoApproveRuns[sessionID] > autoApproveMaxRuns {
+					// Auto-approve has fired too many consecutive times.
+					// The dialog is stuck or permissions are queuing
+					// faster than we can dismiss. Fall through to the
+					// normal notification path so the user gets a
+					// Telegram/desktop alert.
+					logging.Info("auto-approve: stuck, falling through to notification",
+						"project", projectName,
+						"session", sessionID,
+						"runs", a.autoApproveRuns[sessionID],
+					)
+				} else {
+					// Send the approval keystroke to the PTY and treat
+					// the session as Working — no notification needed.
+					logging.Info("auto-approve: sending keystroke",
+						"project", projectName,
+						"session", sessionID,
+						"run", a.autoApproveRuns[sessionID],
+						"bytesHex", fmt.Sprintf("%x", result.Keystroke),
+						"bytesLen", len(result.Keystroke),
+					)
+					// WriteKeystroke may sleep for the agent's submit delay;
+					// keep that off the UI thread. It holds the session's
+					// input lock, so user keys can't land mid-sequence.
+					go s.WriteKeystroke(result.Keystroke)
+					a.markWorking(sessionID, projectName)
+					continue
 				}
-			}
-
-			// Auto-confirm question series Confirm tab. After the user
-			// answered all questions via Telegram buttons, the dialog
-			// auto-advances to a review screen. Press Enter to submit
-			// the collected answers so the agent can continue.
-			if event.Type == attention.NeedsAnswer && strings.Contains(event.Detail, "confirm tab") {
-				s.Write([]byte("\r"))
-				a.sessionStates[sessionID] = StateWorking
-				a.statusbar.states[sessionID] = StateWorking
-				a.sidebar.states[projectName] = a.aggregateProjectState(projectName)
-				delete(a.stateStickUntil, sessionID)
-				logging.Info("auto-confirm: submitted question series confirm tab",
-					"project", projectName,
-					"session", sessionID,
-				)
-				continue
 			}
 
 			state := attentionEventToState(event)

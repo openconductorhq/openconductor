@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/openconductorhq/openconductor/internal/config"
+	"github.com/openconductorhq/openconductor/internal/fsutil"
 	"github.com/openconductorhq/openconductor/internal/logging"
 )
 
@@ -131,50 +132,29 @@ func WritePersonaBundle(
 	persona config.PersonaType,
 	customPersonas []config.CustomPersona,
 ) error {
-	// 1. Write instructions (agent-specific strategy).
 	switch agentType {
 	case config.AgentClaudeCode:
 		if err := WritePersonaSection(repoPath, agentType, persona, customPersonas); err != nil {
 			return fmt.Errorf("writing instructions: %w", err)
 		}
+		if err := writeClaudeMCPs(repoPath, persona); err != nil {
+			return fmt.Errorf("writing MCPs: %w", err)
+		}
+		if err := writeSkills(repoPath, persona); err != nil {
+			return fmt.Errorf("writing skills: %w", err)
+		}
+		if err := writePlugins(repoPath, persona); err != nil {
+			return fmt.Errorf("writing plugins: %w", err)
+		}
 	case config.AgentOpenCode:
 		if err := writeOpenCodeInstructions(repoPath, persona, customPersonas); err != nil {
 			return fmt.Errorf("writing instructions: %w", err)
 		}
-	}
-
-	// 2. Write MCPs.
-	if err := writeMCPs(repoPath, agentType, persona); err != nil {
-		return fmt.Errorf("writing MCPs: %w", err)
-	}
-
-	// 3. Write skills (Claude Code only).
-	if agentType == config.AgentClaudeCode {
-		if err := writeSkills(repoPath, persona); err != nil {
-			return fmt.Errorf("writing skills: %w", err)
+		if err := writeOpenCodeMCPs(repoPath, persona); err != nil {
+			return fmt.Errorf("writing MCPs: %w", err)
 		}
 	}
-
-	// 4. Write plugin enablement (Claude Code only).
-	if agentType == config.AgentClaudeCode {
-		if err := writePlugins(repoPath, persona); err != nil {
-			return fmt.Errorf("writing plugins: %w", err)
-		}
-	}
-
 	return nil
-}
-
-// writeMCPs dispatches MCP writing to the agent-specific implementation.
-func writeMCPs(repoPath string, agentType config.AgentType, persona config.PersonaType) error {
-	switch agentType {
-	case config.AgentClaudeCode:
-		return writeClaudeMCPs(repoPath, persona)
-	case config.AgentOpenCode:
-		return writeOpenCodeMCPs(repoPath, persona)
-	default:
-		return nil
-	}
 }
 
 // writeClaudeMCPs merges persona MCP servers into the project's .mcp.json.
@@ -182,18 +162,9 @@ func writeMCPs(repoPath string, agentType config.AgentType, persona config.Perso
 func writeClaudeMCPs(repoPath string, persona config.PersonaType) error {
 	filePath := filepath.Join(repoPath, ".mcp.json")
 
-	// Read existing or create empty structure.
-	var doc map[string]interface{}
-	data, err := os.ReadFile(filePath)
+	doc, err := readJSONDoc(filePath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("reading .mcp.json: %w", err)
-		}
-		doc = map[string]interface{}{"mcpServers": map[string]interface{}{}}
-	} else {
-		if err := json.Unmarshal(data, &doc); err != nil {
-			return fmt.Errorf("parsing .mcp.json: %w", err)
-		}
+		return err
 	}
 
 	// Ensure mcpServers exists.
@@ -218,15 +189,8 @@ func writeClaudeMCPs(repoPath string, persona config.PersonaType) error {
 		}
 	}
 
-	// Write back.
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling .mcp.json: %w", err)
-	}
-	out = append(out, '\n')
-
 	logging.Info("persona: wrote MCPs", "file", filePath, "persona", string(persona))
-	return atomicWrite(filePath, out, 0o644)
+	return writeJSONDoc(filePath, doc)
 }
 
 // writeOpenCodeMCPs merges persona MCP servers into the project's opencode.json.
@@ -234,17 +198,9 @@ func writeClaudeMCPs(repoPath string, persona config.PersonaType) error {
 func writeOpenCodeMCPs(repoPath string, persona config.PersonaType) error {
 	filePath := filepath.Join(repoPath, "opencode.json")
 
-	var doc map[string]interface{}
-	data, err := os.ReadFile(filePath)
+	doc, err := readJSONDoc(filePath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("reading opencode.json: %w", err)
-		}
-		doc = map[string]interface{}{}
-	} else {
-		if err := json.Unmarshal(data, &doc); err != nil {
-			return fmt.Errorf("parsing opencode.json: %w", err)
-		}
+		return err
 	}
 
 	// Ensure mcp key exists.
@@ -269,14 +225,8 @@ func writeOpenCodeMCPs(repoPath string, persona config.PersonaType) error {
 		}
 	}
 
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling opencode.json: %w", err)
-	}
-	out = append(out, '\n')
-
 	logging.Info("persona: wrote MCPs", "file", filePath, "persona", string(persona))
-	return atomicWrite(filePath, out, 0o644)
+	return writeJSONDoc(filePath, doc)
 }
 
 // writeSkills manages skill directories under .claude/skills/ for Claude Code.
@@ -305,7 +255,7 @@ func writeSkills(repoPath string, persona config.PersonaType) error {
 			return fmt.Errorf("creating skill dir %s: %w", skill.Name, err)
 		}
 		skillFile := filepath.Join(dir, "SKILL.md")
-		if err := atomicWrite(skillFile, []byte(skill.Content), 0o644); err != nil {
+		if err := fsutil.AtomicWrite(skillFile, []byte(skill.Content), 0o644); err != nil {
 			return fmt.Errorf("writing skill %s: %w", skill.Name, err)
 		}
 		logging.Info("persona: wrote skill", "skill", skill.Name)
@@ -321,18 +271,9 @@ func writePlugins(repoPath string, persona config.PersonaType) error {
 	settingsDir := filepath.Join(repoPath, ".claude")
 	settingsPath := filepath.Join(settingsDir, "settings.json")
 
-	// Read existing settings or create empty.
-	var doc map[string]interface{}
-	data, err := os.ReadFile(settingsPath)
+	doc, err := readJSONDoc(settingsPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("reading settings.json: %w", err)
-		}
-		doc = map[string]interface{}{}
-	} else {
-		if err := json.Unmarshal(data, &doc); err != nil {
-			return fmt.Errorf("parsing settings.json: %w", err)
-		}
+		return err
 	}
 
 	// Ensure enabledPlugins exists.
@@ -376,14 +317,8 @@ func writePlugins(repoPath string, persona config.PersonaType) error {
 		return fmt.Errorf("creating .claude dir: %w", err)
 	}
 
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling settings.json: %w", err)
-	}
-	out = append(out, '\n')
-
 	logging.Info("persona: wrote plugins", "file", settingsPath, "persona", string(persona))
-	return atomicWrite(settingsPath, out, 0o644)
+	return writeJSONDoc(settingsPath, doc)
 }
 
 // writeOpenCodeInstructions writes persona instructions to a standalone
@@ -411,7 +346,7 @@ func writeOpenCodeInstructions(repoPath string, persona config.PersonaType, cust
 	}
 
 	// Write persona instruction file.
-	if err := atomicWrite(personaFile, []byte(personaText+"\n"), 0o644); err != nil {
+	if err := fsutil.AtomicWrite(personaFile, []byte(personaText+"\n"), 0o644); err != nil {
 		return err
 	}
 
@@ -422,17 +357,9 @@ func writeOpenCodeInstructions(repoPath string, persona config.PersonaType, cust
 // addOpenCodeInstruction ensures instrFile is present in the opencode.json
 // instructions array. Creates the file if it does not exist.
 func addOpenCodeInstruction(configFile string, instrFile string) error {
-	var doc map[string]interface{}
-	data, err := os.ReadFile(configFile)
+	doc, err := readJSONDoc(configFile)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-		doc = map[string]interface{}{}
-	} else {
-		if err := json.Unmarshal(data, &doc); err != nil {
-			return err
-		}
+		return err
 	}
 
 	// Get or create instructions array.
@@ -453,26 +380,16 @@ func addOpenCodeInstruction(configFile string, instrFile string) error {
 	instructions = append(instructions, instrFile)
 	doc["instructions"] = instructions
 
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return err
-	}
-	out = append(out, '\n')
-	return atomicWrite(configFile, out, 0o644)
+	return writeJSONDoc(configFile, doc)
 }
 
 // removeOpenCodeInstruction removes instrFile from the opencode.json
 // instructions array. Does nothing if the config file does not exist or
 // the entry is not present.
 func removeOpenCodeInstruction(configFile string, instrFile string) error {
-	data, err := os.ReadFile(configFile)
+	doc, err := readJSONDoc(configFile)
 	if err != nil {
-		return nil // no config file, nothing to remove from
-	}
-
-	var doc map[string]interface{}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil
+		return nil // unreadable config: nothing we can safely remove from
 	}
 
 	existing, ok := doc["instructions"]
@@ -499,10 +416,34 @@ func removeOpenCodeInstruction(configFile string, instrFile string) error {
 		doc["instructions"] = filtered
 	}
 
+	return writeJSONDoc(configFile, doc)
+}
+
+// readJSONDoc reads a JSON object from path. A missing file yields an empty
+// document so callers can merge into it.
+func readJSONDoc(path string) (map[string]interface{}, error) {
+	doc := map[string]interface{}{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return doc, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", filepath.Base(path), err)
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", filepath.Base(path), err)
+	}
+	if doc == nil { // file contained JSON null
+		doc = map[string]interface{}{}
+	}
+	return doc, nil
+}
+
+// writeJSONDoc writes doc to path as indented JSON, atomically.
+func writeJSONDoc(path string, doc map[string]interface{}) error {
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("marshaling %s: %w", filepath.Base(path), err)
 	}
-	out = append(out, '\n')
-	return atomicWrite(configFile, out, 0o644)
+	return fsutil.AtomicWrite(path, append(out, '\n'), 0o644)
 }

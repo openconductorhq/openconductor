@@ -161,7 +161,7 @@ func TestIntegrationOpenAIClassifier(t *testing.T) {
 		t.Skip("OPENAI_API_KEY not set, skipping OpenAI integration test")
 	}
 
-	client := llm.NewOpenAIClient(apiKey, "")
+	client := llm.NewOpenAIClient(apiKey, "", "")
 	runProviderIntegration(t, client, "openai")
 }
 
@@ -188,7 +188,7 @@ func TestIntegrationFullPipeline(t *testing.T) {
 		client = llm.NewAnthropicClient(key, "")
 		providerName = "anthropic"
 	} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-		client = llm.NewOpenAIClient(key, "")
+		client = llm.NewOpenAIClient(key, "", "")
 		providerName = "openai"
 	} else if key := os.Getenv("GOOGLE_API_KEY"); key != "" {
 		var err error

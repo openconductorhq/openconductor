@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/openconductorhq/openconductor/internal/config"
+	"github.com/openconductorhq/openconductor/internal/fsutil"
 )
 
 // topicState manages the mapping between project names and Telegram Forum
@@ -58,7 +59,7 @@ func (s *topicState) Save() error {
 		return err
 	}
 
-	return os.WriteFile(s.path, data, 0o644)
+	return fsutil.AtomicWrite(s.path, data, 0o644)
 }
 
 // Get returns the topic ID for a project, or 0 if not set.

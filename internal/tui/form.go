@@ -6,12 +6,12 @@ package tui
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/openconductorhq/openconductor/internal/config"
+	"github.com/openconductorhq/openconductor/internal/fsutil"
 	"github.com/openconductorhq/openconductor/internal/persona"
 )
 
@@ -262,11 +262,7 @@ func (m formModel) advance() (formModel, tea.Cmd) {
 			return m, nil
 		}
 		// Expand ~ to home dir.
-		if strings.HasPrefix(repo, "~/") {
-			if home, err := os.UserHomeDir(); err == nil {
-				repo = filepath.Join(home, repo[2:])
-			}
-		}
+		repo = fsutil.ExpandHome(repo)
 		info, err := os.Stat(repo)
 		if err != nil || !info.IsDir() {
 			m.err = "Path does not exist or is not a directory"

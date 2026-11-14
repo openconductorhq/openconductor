@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/openconductorhq/openconductor/internal/attention"
@@ -468,7 +467,7 @@ func TestClaudeCode_QuestionSingleFooter(t *testing.T) {
 	if event == nil || event.Type != attention.NeedsAnswer {
 		t.Fatalf("expected NeedsAnswer, got %v", event)
 	}
-	if strings.Contains(event.Detail, "confirm tab") {
+	if event.AutoKeystroke != nil {
 		t.Error("single question should not be confirm tab")
 	}
 }
@@ -511,7 +510,7 @@ func TestClaudeCode_QuestionReviewScreen(t *testing.T) {
 	if event == nil || event.Type != attention.NeedsAnswer {
 		t.Fatalf("expected NeedsAnswer, got %v", event)
 	}
-	if !strings.Contains(event.Detail, "confirm tab") {
+	if event.AutoKeystroke == nil {
 		t.Errorf("review screen should be detected as confirm tab, got %q", event.Detail)
 	}
 }
@@ -1065,6 +1064,21 @@ func TestClaudeCode_IsChromeLine(t *testing.T) {
 		got := a.IsChromeLine(tt.line)
 		if got != tt.want {
 			t.Errorf("IsChromeLine(%q) = %v, want %v", tt.line, got, tt.want)
+		}
+	}
+}
+
+func TestEncodeClaudeProjectPath(t *testing.T) {
+	// Expected values observed from Claude Code 2.1 on disk.
+	tests := []struct{ in, want string }{
+		{"/home/u/Development/openconductor", "-home-u-Development-openconductor"},
+		{"/home/u/ahavat-zion/.claude/worktrees/x", "-home-u-ahavat-zion--claude-worktrees-x"},
+		{"/tmp/enc_t.e st+x@y", "-tmp-enc-t-e-st-x-y"},
+		{"/tmp/encב😀z", "-tmp-enc---z"},
+	}
+	for _, tt := range tests {
+		if got := encodeClaudeProjectPath(tt.in); got != tt.want {
+			t.Errorf("encodeClaudeProjectPath(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }

@@ -9,31 +9,6 @@ import (
 	"github.com/openconductorhq/openconductor/internal/config"
 )
 
-func TestInstructionText(t *testing.T) {
-	tests := []struct {
-		name      string
-		persona   config.PersonaType
-		wantEmpty bool
-	}{
-		{"Vibe has text", config.PersonaVibe, false},
-		{"POC has text", config.PersonaPOC, false},
-		{"Scale has text", config.PersonaScale, false},
-		{"None is empty", config.PersonaNone, true},
-		{"unknown is empty", config.PersonaType("unknown"), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := InstructionText(tt.persona)
-			if tt.wantEmpty && got != "" {
-				t.Errorf("InstructionText(%q) = %q, want empty", tt.persona, got)
-			}
-			if !tt.wantEmpty && got == "" {
-				t.Errorf("InstructionText(%q) is empty, want non-empty", tt.persona)
-			}
-		})
-	}
-}
-
 func TestTargetFile(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -48,27 +23,6 @@ func TestTargetFile(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := TargetFile(tt.agentType); got != tt.want {
 				t.Errorf("TargetFile(%q) = %q, want %q", tt.agentType, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestDefaultApproval(t *testing.T) {
-	tests := []struct {
-		name    string
-		persona config.PersonaType
-		want    config.ApprovalLevel
-	}{
-		{"Vibe is Full", config.PersonaVibe, config.ApprovalFull},
-		{"POC is Safe", config.PersonaPOC, config.ApprovalSafe},
-		{"Scale is Off", config.PersonaScale, config.ApprovalOff},
-		{"None is Off", config.PersonaNone, config.ApprovalOff},
-		{"unknown is Off", config.PersonaType("unknown"), config.ApprovalOff},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := DefaultApproval(tt.persona); got != tt.want {
-				t.Errorf("DefaultApproval(%q) = %q, want %q", tt.persona, got, tt.want)
 			}
 		})
 	}

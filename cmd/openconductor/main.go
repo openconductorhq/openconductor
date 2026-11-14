@@ -111,7 +111,7 @@ func runBootstrap(args []string) {
 	}
 
 	repoPath := args[0]
-	agentType := "claude-code"
+	agentType := config.AgentClaudeCode
 	personaFlag := ""
 
 	// Parse remaining flags.
@@ -123,7 +123,7 @@ func runBootstrap(args []string) {
 				os.Exit(1)
 			}
 			i++
-			agentType = args[i]
+			agentType = config.AgentType(args[i])
 		case "--persona":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "Error: --persona requires a value")
@@ -145,7 +145,7 @@ func runBootstrap(args []string) {
 
 	if personaFlag != "" {
 		cfg := config.LoadOrDefault(config.DefaultConfigPath())
-		if err := persona.WritePersonaBundle(repoPath, config.AgentType(agentType), config.PersonaType(personaFlag), cfg.Personas); err != nil {
+		if err := persona.WritePersonaBundle(repoPath, agentType, config.PersonaType(personaFlag), cfg.Personas); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not write persona: %v\n", err)
 		}
 	}
@@ -172,7 +172,7 @@ func newLLMClient(cfg *config.Config) llm.Client {
 	case "anthropic":
 		return llm.NewAnthropicClient(apiKey, model)
 	case "openai":
-		return llm.NewOpenAIClient(apiKey, model)
+		return llm.NewOpenAIClient(apiKey, model, cfg.LLM.BaseURL)
 	case "google":
 		client, err := llm.NewGoogleClient(context.Background(), apiKey, model)
 		if err != nil {

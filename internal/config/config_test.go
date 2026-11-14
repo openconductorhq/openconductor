@@ -270,40 +270,6 @@ func TestValidateAcceptsEmptyPersona(t *testing.T) {
 	}
 }
 
-func TestValidatePersonaRefBuiltin(t *testing.T) {
-	cfg := &Config{}
-	for _, p := range []PersonaType{PersonaVibe, PersonaPOC, PersonaScale} {
-		if err := cfg.ValidatePersonaRef(p); err != nil {
-			t.Fatalf("expected builtin persona %q to be accepted, got %v", p, err)
-		}
-	}
-}
-
-func TestValidatePersonaRefNone(t *testing.T) {
-	cfg := &Config{}
-	if err := cfg.ValidatePersonaRef(PersonaNone); err != nil {
-		t.Fatalf("expected empty persona ref to be accepted, got %v", err)
-	}
-}
-
-func TestValidatePersonaRefCustom(t *testing.T) {
-	cfg := &Config{
-		Personas: []CustomPersona{
-			{Name: "my-custom", Label: "My Custom", Instructions: "do stuff"},
-		},
-	}
-	if err := cfg.ValidatePersonaRef(PersonaType("my-custom")); err != nil {
-		t.Fatalf("expected custom persona 'my-custom' to be accepted, got %v", err)
-	}
-}
-
-func TestValidatePersonaRefUnknown(t *testing.T) {
-	cfg := &Config{}
-	if err := cfg.ValidatePersonaRef(PersonaType("nonexistent")); err == nil {
-		t.Fatal("expected error for unknown persona ref 'nonexistent'")
-	}
-}
-
 func TestValidateCustomPersonaMissingName(t *testing.T) {
 	cfg := &Config{
 		Personas: []CustomPersona{

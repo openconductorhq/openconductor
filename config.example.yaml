@@ -22,6 +22,7 @@ projects:
 #   provider: anthropic          # anthropic | openai | google
 #   model: ""                    # empty = provider default
 #   api_key_env: ANTHROPIC_API_KEY  # env var name (not the key itself)
+#   base_url: ""                 # openai only: proxy or local OpenAI-compatible server
 
 # Desktop notifications.
 notifications:

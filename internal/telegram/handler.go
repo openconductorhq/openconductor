@@ -101,7 +101,7 @@ func (h *handler) HandleInbound(text string, threadID int) bool {
 		waitForReady(s, 30*time.Second)
 	}
 
-	writeWithEnter(s, text)
+	s.SubmitText(text)
 	logging.Info("telegram: forwarded message to agent", "project", project, "session", s.ID, "len", len(text))
 	return true
 }
@@ -166,11 +166,11 @@ func (h *handler) HandleCallback(b *Bot, query *tgbotapi.CallbackQuery) {
 				// Agent has no session-wide approval — fall back to single approve.
 				s.Write(adapter.ApproveKeystroke())
 			} else {
-				writePermKeystroke(s, ks)
+				s.WriteKeystroke(ks)
 			}
 			actionLabel = "Allowed always"
 		case "deny":
-			writePermKeystroke(s, adapter.DenyKeystroke())
+			s.WriteKeystroke(adapter.DenyKeystroke())
 			actionLabel = "Denied"
 		default:
 			b.answerCallbackRaw(query.ID, "Unknown action")
@@ -184,15 +184,15 @@ func (h *handler) HandleCallback(b *Bot, query *tgbotapi.CallbackQuery) {
 		adapter := h.getAdapter(project)
 		if qr, ok := adapter.(agent.QuestionResponder); ok {
 			num, _ := strconv.Atoi(action)
-			writePermKeystroke(s, qr.QuestionKeystroke(num))
+			s.WriteKeystroke(qr.QuestionKeystroke(num))
 		} else {
-			writeWithEnter(s, action)
+			s.SubmitText(action)
 		}
 		actionLabel = fmt.Sprintf("Selected: %s", action)
 
 	case "reply":
 		// Quick-reply action from Attention/Error keyboards.
-		writeWithEnter(s, action)
+		s.SubmitText(action)
 		actionLabel = fmt.Sprintf("Replied: %s", action)
 
 	default:
@@ -276,38 +276,6 @@ func waitForReady(s *session.Session, timeout time.Duration) {
 	logging.Debug("telegram: agent readiness timeout, sending anyway")
 }
 
-// writeWithEnter writes text to the session's PTY, pauses for the agent's
-// configured submit delay, then sends Enter (\r). The delay ensures the TUI's
-// event loop processes the text characters before receiving the submit key.
-// The delay comes from the agent adapter's SubmitDelay interface; agents that
-// don't need a delay (e.g. Claude Code) return 0.
-func writeWithEnter(s *session.Session, text string) {
-	s.Write([]byte(text))
-	if d := agent.GetSubmitDelay(s.Project.Agent); d > 0 {
-		time.Sleep(d)
-	}
-	s.Write([]byte("\r"))
-}
-
-// writePermKeystroke writes a permission keystroke to the session's PTY. If
-// the keystroke already ends with a submit character (\r or \n), it is written
-// as-is (e.g. Claude Code's "y\n"). Otherwise, the keystroke is navigation
-// for a selection dialog (e.g. OpenCode's arrow keys), so a SubmitDelay pause
-// and Enter are appended to confirm the selection.
-func writePermKeystroke(s *session.Session, ks []byte) {
-	s.Write(ks)
-	// If the keystroke already includes Enter/LF, the agent handles
-	// confirmation internally (e.g. Claude Code's "n\n").
-	if len(ks) > 0 && (ks[len(ks)-1] == '\r' || ks[len(ks)-1] == '\n') {
-		return
-	}
-	// Navigation-only keystroke (e.g. arrow keys) — confirm with Enter.
-	if d := agent.GetSubmitDelay(s.Project.Agent); d > 0 {
-		time.Sleep(d)
-	}
-	s.Write([]byte("\r"))
-}
-
 // HandleInboundMedia processes an inbound photo or document from a Telegram
 // Forum Topic. The file is downloaded, saved to <repo>/.openconductor/images/,
 // and the path (plus optional caption) is forwarded to the agent's PTY.
@@ -387,7 +355,7 @@ func (h *handler) HandleInboundMedia(
 	// Format the message for the agent.
 	msg := agent.FormatImageInput(s.Project.Agent, relPath, caption)
 
-	writeWithEnter(s, msg)
+	s.SubmitText(msg)
 	logging.Info("telegram: forwarded media to agent",
 		"project", project,
 		"session", s.ID,
@@ -417,19 +385,6 @@ func PermissionKeyboard(project string) tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("🟢 Allow Once", FormatCallbackData("perm", project, "allow")),
 			tgbotapi.NewInlineKeyboardButtonData("🟡 Allow Always", FormatCallbackData("perm", project, "allowall")),
 			tgbotapi.NewInlineKeyboardButtonData("🔴 Deny", FormatCallbackData("perm", project, "deny")),
-		),
-	)
-}
-
-// AttentionKeyboard returns an inline keyboard with common quick replies
-// for when the agent needs user input.
-func AttentionKeyboard(project string) tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🟡 yes", FormatCallbackData("reply", project, "yes")),
-			tgbotapi.NewInlineKeyboardButtonData("🟡 no", FormatCallbackData("reply", project, "no")),
-			tgbotapi.NewInlineKeyboardButtonData("🟡 continue", FormatCallbackData("reply", project, "continue")),
-			tgbotapi.NewInlineKeyboardButtonData("⏭ skip", FormatCallbackData("reply", project, "skip")),
 		),
 	)
 }
@@ -470,72 +425,4 @@ func extractLeadingNumber(s string) string {
 		}
 	}
 	return s
-}
-
-// ParseQuestionOptions extracts numbered options from the question dialog
-// at the bottom of OpenCode's screen. It scans backward from the dialog
-// footer ("enter submit  esc dismiss") to collect only the actual options,
-// avoiding false matches on numbered items in earlier conversation content.
-func ParseQuestionOptions(lines []string) []string {
-	// Find the question dialog footer — scan backward.
-	footerIdx := -1
-	for i := len(lines) - 1; i >= 0; i-- {
-		lower := strings.ToLower(strings.TrimSpace(lines[i]))
-		if (strings.Contains(lower, "enter submit") || strings.Contains(lower, "enter confirm")) &&
-			strings.Contains(lower, "esc dismiss") {
-			footerIdx = i
-			break
-		}
-	}
-
-	// If no dialog footer found, try a broader scan for "select" + ("dismiss" or "cancel").
-	// Claude Code uses "Esc to cancel" while OpenCode uses "esc dismiss".
-	if footerIdx < 0 {
-		for i := len(lines) - 1; i >= 0; i-- {
-			lower := strings.ToLower(strings.TrimSpace(lines[i]))
-			if strings.Contains(lower, "select") && (strings.Contains(lower, "dismiss") || strings.Contains(lower, "cancel")) {
-				footerIdx = i
-				break
-			}
-		}
-	}
-
-	if footerIdx < 0 {
-		return nil
-	}
-
-	// Scan backward from the footer to collect numbered options.
-	// Stop when we hit a line that's not an option, description, or blank
-	// (i.e., we've left the dialog area).
-	var options []string
-	for i := footerIdx - 1; i >= 0; i-- {
-		trimmed := strings.TrimSpace(lines[i])
-		if trimmed == "" {
-			continue
-		}
-		// Strip leading border/cursor characters from agent dialogs.
-		// OpenCode uses box-drawing (│, ┃); Claude Code uses › cursor.
-		stripped := strings.TrimLeft(trimmed, "│┃|▏▎›❯ ")
-		stripped = strings.TrimSpace(stripped)
-		if stripped == "" {
-			continue
-		}
-		// Check if this is a numbered option.
-		if len(stripped) >= 2 && stripped[0] >= '1' && stripped[0] <= '9' && (stripped[1] == '.' || stripped[1] == ')') {
-			options = append(options, stripped)
-			continue
-		}
-		// Indented text (description line for a previous option) — skip but keep scanning.
-		if strings.HasPrefix(trimmed, " ") || strings.HasPrefix(trimmed, "│") || strings.HasPrefix(trimmed, "┃") || strings.HasPrefix(trimmed, "›") {
-			continue
-		}
-		// Non-option, non-indented line — we've left the dialog. Stop.
-		break
-	}
-
-	// Reverse to get ascending order (1, 2, 3...).
-	for i, j := 0, len(options)-1; i < j; i, j = i+1, j-1 {
-		options[i], options[j] = options[j], options[i]
-	}
-	return options
 }

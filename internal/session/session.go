@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/hinshun/vt10x"
@@ -47,12 +48,22 @@ type Session struct {
 	outputFilter func([]byte) []byte
 
 	// scrollCapture collects lines that scroll off the top of the vt10x
-	// grid during VT.Write(). The App's checkScrollback() drains these.
+	// grid during VT.Write(). CheckScrollback drains these.
 	scrollCapture []ScrollCapturedLine
+
+	// scrollback holds rows that left the screen; snapTexts/snapGlyphs are
+	// the screen at the last CheckScrollback, for snapshot-based detection.
+	scrollback *Scrollback
+	snapTexts  []string
+	snapGlyphs []ScrollbackLine
 
 	Mu            sync.RWMutex
 	Width, Height int
-	closed        bool
+
+	closed bool
+	// inputMu serializes PTY input so multi-part sequences (keys, delay,
+	// Enter) are never interleaved with other writes.
+	inputMu sync.Mutex
 }
 
 // ScrollCapturedLine holds a single terminal row captured as it scrolled
@@ -78,7 +89,7 @@ func NewSession(project config.Project) (*Session, error) {
 
 	// If the agent implements OutputFilter, create a per-session filter
 	// function to preprocess PTY output before vt10x.
-	if f := agent.GetOutputFilter(project.Agent); f != nil {
+	if f, ok := adapter.(agent.OutputFilter); ok {
 		s.outputFilter = f.NewOutputFilter()
 	}
 
@@ -177,6 +188,12 @@ func (s *Session) StartCmd(cmd *exec.Cmd, width, height int) error {
 
 // Write sends data to the PTY (i.e. user keyboard input).
 func (s *Session) Write(data []byte) {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	s.write(data)
+}
+
+func (s *Session) write(data []byte) {
 	s.Mu.RLock()
 	defer s.Mu.RUnlock()
 
@@ -227,16 +244,7 @@ func (s *Session) GetScreenLines() []string {
 
 	lines := make([]string, h)
 	for row := 0; row < h; row++ {
-		var sb strings.Builder
-		for col := 0; col < s.Width; col++ {
-			g := s.VT.Cell(col, row)
-			if g.Char == 0 {
-				sb.WriteRune(' ')
-			} else {
-				sb.WriteRune(g.Char)
-			}
-		}
-		lines[row] = strings.TrimRight(sb.String(), " ")
+		lines[row] = RowText(s.VT, row, s.Width)
 	}
 	return lines
 }
@@ -321,7 +329,6 @@ func (s *Session) ReadLoop() <-chan []byte {
 // Must be called with s.Mu held (write lock).
 func (s *Session) captureScrollOff(data []byte) {
 	vt := s.VT
-	cursor := vt.Cursor()
 	h := s.Height
 
 	// For alt-screen apps (like OpenCode), skip the capture — their TUI
@@ -331,7 +338,6 @@ func (s *Session) captureScrollOff(data []byte) {
 		vt.Write(data)
 		return
 	}
-	_ = cursor
 
 	// Snapshot the top rows before write. We save up to height rows because
 	// a large write can scroll the entire screen.
@@ -340,81 +346,21 @@ func (s *Session) captureScrollOff(data []byte) {
 	w := s.Width
 	for row := 0; row < h; row++ {
 		glyphs := make([]vt10x.Glyph, w)
-		var sb strings.Builder
 		for col := 0; col < w; col++ {
-			g := vt.Cell(col, row)
-			glyphs[col] = g
-			if g.Char == 0 {
-				sb.WriteRune(' ')
-			} else {
-				sb.WriteRune(g.Char)
-			}
+			glyphs[col] = vt.Cell(col, row)
 		}
-		preTexts[row] = strings.TrimRight(sb.String(), " ")
+		preTexts[row] = GlyphsText(glyphs)
 		preGlyphs[row] = glyphs
 	}
 
 	// Perform the actual write.
 	vt.Write(data)
 
-	// Detect how many rows scrolled off by finding where old content
-	// ended up in the new screen. Check multiple old rows against the
-	// new screen to find the shift.
-	scrolled := 0
-	for shift := 1; shift < h; shift++ {
-		// Check if old[shift] == new[0]: the old row at position 'shift'
-		// is now at position 0, meaning 'shift' rows scrolled off.
-		if preTexts[shift] == "" {
-			continue
-		}
-		var sb strings.Builder
-		for col := 0; col < w; col++ {
-			g := vt.Cell(col, 0)
-			if g.Char == 0 {
-				sb.WriteRune(' ')
-			} else {
-				sb.WriteRune(g.Char)
-			}
-		}
-		newRow0 := strings.TrimRight(sb.String(), " ")
-		if preTexts[shift] == newRow0 {
-			scrolled = shift
-			break
-		}
+	newTexts := make([]string, h)
+	for row := 0; row < h; row++ {
+		newTexts[row] = RowText(vt, row, w)
 	}
-
-	// Fallback: if we couldn't find a matching row (entire screen changed),
-	// check how many old rows are NOT in the new screen at all. This handles
-	// bursts larger than the screen height where no old content survives.
-	if scrolled == 0 {
-		newTexts := make(map[string]struct{}, h)
-		for row := 0; row < h; row++ {
-			var sb strings.Builder
-			for col := 0; col < w; col++ {
-				g := vt.Cell(col, row)
-				if g.Char == 0 {
-					sb.WriteRune(' ')
-				} else {
-					sb.WriteRune(g.Char)
-				}
-			}
-			t := strings.TrimRight(sb.String(), " ")
-			if t != "" {
-				newTexts[t] = struct{}{}
-			}
-		}
-		// Count old non-blank rows that are completely gone from the new screen.
-		for i := 0; i < h; i++ {
-			if preTexts[i] == "" {
-				continue
-			}
-			if _, exists := newTexts[preTexts[i]]; !exists {
-				scrolled++
-			} else {
-				break // Found a surviving row — stop counting.
-			}
-		}
-	}
+	scrolled := scrollShift(preTexts, newTexts)
 
 	// Push scrolled-off rows to the capture buffer. Blank lines are
 	// preserved — they serve as meaningful separators in CLI agent output
@@ -429,12 +375,52 @@ func (s *Session) captureScrollOff(data []byte) {
 	}
 }
 
-// DrainScrollCapture returns and clears all lines captured during VT.Write()
-// scroll-off events. Called by the App's checkScrollback() to push these
-// lines into the scrollback buffer.
-//
-// Must be called with s.Mu held (at least read lock).
-func (s *Session) DrainScrollCapture() []ScrollCapturedLine {
+// scrollShift returns how many rows scrolled off the top between the pre
+// and post screens. It picks the shift (0 = no scroll) under which the most
+// non-blank old rows line up with the new screen, so a row that merely
+// repeats lower down (a table separator) isn't mistaken for a scroll; ties
+// go to the smaller shift. If no shift lines anything up (a burst larger
+// than the screen), it counts leading old rows absent from the new screen.
+func scrollShift(pre, post []string) int {
+	h := len(pre)
+	best, bestScore := 0, 0
+	for shift := 0; shift < h; shift++ {
+		score := 0
+		for i := 0; i+shift < h; i++ {
+			if pre[i+shift] != "" && post[i] == pre[i+shift] {
+				score++
+			}
+		}
+		if score > bestScore {
+			best, bestScore = shift, score
+		}
+	}
+	if bestScore > 0 {
+		return best
+	}
+
+	present := make(map[string]struct{}, h)
+	for _, t := range post {
+		if t != "" {
+			present[t] = struct{}{}
+		}
+	}
+	gone := 0
+	for _, t := range pre {
+		if t == "" {
+			continue
+		}
+		if _, ok := present[t]; ok {
+			break
+		}
+		gone++
+	}
+	return gone
+}
+
+// drainScrollCapture returns and clears all lines captured during VT.Write()
+// scroll-off events. Called by CheckScrollback with s.Mu held for writing.
+func (s *Session) drainScrollCapture() []ScrollCapturedLine {
 	if len(s.scrollCapture) == 0 {
 		return nil
 	}
@@ -459,13 +445,6 @@ func (s *Session) GetVT() (vt vt10x.Terminal, width, height int) {
 	return s.VT, s.Width, s.Height
 }
 
-// IsRunning reports whether the session has an active PTY process.
-func (s *Session) IsRunning() bool {
-	s.Mu.RLock()
-	defer s.Mu.RUnlock()
-	return !s.closed && s.Ptmx != nil
-}
-
 // Close terminates the agent process and releases PTY resources.
 func (s *Session) Close() {
 	s.Mu.Lock()
@@ -484,4 +463,63 @@ func (s *Session) Close() {
 	}
 
 	s.State = StateStopped
+}
+
+// SubmitText writes text to the PTY, pauses for the agent's submit delay,
+// then sends Enter (\r). The delay lets TUI agents (e.g. OpenCode) process
+// the typed characters before the submit key arrives.
+func (s *Session) SubmitText(text string) {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	s.write([]byte(text))
+	s.submit()
+}
+
+// WriteKeystroke writes a permission/question keystroke. If it already ends
+// with \r or \n (e.g. Claude Code's "y\n") it is written as-is; otherwise it
+// is a navigation sequence (e.g. OpenCode's arrow keys) and is confirmed with
+// Enter after the agent's submit delay.
+func (s *Session) WriteKeystroke(ks []byte) {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	s.write(ks)
+	if len(ks) > 0 && (ks[len(ks)-1] == '\r' || ks[len(ks)-1] == '\n') {
+		return
+	}
+	s.submit()
+}
+
+func (s *Session) submit() {
+	if d := agent.GetSubmitDelay(s.Project.Agent); d > 0 {
+		time.Sleep(d)
+	}
+	s.write([]byte("\r"))
+}
+
+// RowText returns the text of one VT row with trailing spaces trimmed.
+// Empty cells (Char == 0) read as spaces. Caller must hold the VT's lock.
+func RowText(vt vt10x.Terminal, row, width int) string {
+	var sb strings.Builder
+	sb.Grow(width)
+	for col := 0; col < width; col++ {
+		writeCellRune(&sb, vt.Cell(col, row).Char)
+	}
+	return strings.TrimRight(sb.String(), " ")
+}
+
+// GlyphsText returns the text of a glyph row with trailing spaces trimmed.
+func GlyphsText(glyphs []vt10x.Glyph) string {
+	var sb strings.Builder
+	sb.Grow(len(glyphs))
+	for _, g := range glyphs {
+		writeCellRune(&sb, g.Char)
+	}
+	return strings.TrimRight(sb.String(), " ")
+}
+
+func writeCellRune(sb *strings.Builder, r rune) {
+	if r == 0 {
+		r = ' '
+	}
+	sb.WriteRune(r)
 }

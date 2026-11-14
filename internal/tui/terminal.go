@@ -5,8 +5,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"reflect"
 	"strconv"
 	"strings"
@@ -14,10 +12,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/creack/pty"
 	"github.com/hinshun/vt10x"
 
 	"github.com/openconductorhq/openconductor/internal/logging"
+	"github.com/openconductorhq/openconductor/internal/session"
 )
 
 // vt10x attribute flags — mirrored from unexported constants in vt10x/state.go.
@@ -29,17 +27,9 @@ const (
 	vtAttrBlink     = 1 << 5
 )
 
-// ptyOutputMsg carries raw bytes read from the PTY.
-type ptyOutputMsg []byte
-
-// ptyExitedMsg signals the PTY process has exited.
-type ptyExitedMsg struct{ err error }
-
 type terminalModel struct {
-	ptmx      *os.File
-	cmd       *exec.Cmd
 	vt        vt10x.Terminal
-	mu        *sync.RWMutex
+	mu        *sync.RWMutex // guards vt; points at the displayed session's Mu
 	width     int
 	height    int
 	focused   bool
@@ -49,7 +39,7 @@ type terminalModel struct {
 	// Scrollback state. The buffer captures glyph rows as they scroll off
 	// the top of the vt10x viewport. scrollOffset tracks how many lines
 	// the user has scrolled up from the live view (0 = live).
-	scrollback   *scrollbackBuffer
+	scrollback   *session.Scrollback
 	scrollOffset int
 
 	// scrollPinned is true when the user has scrolled up into history and
@@ -82,113 +72,8 @@ func newTerminalModel() terminalModel {
 		mu:         &sync.RWMutex{},
 		focused:    true,
 		active:     false,
-		scrollback: newScrollbackBuffer(defaultScrollbackCapacity),
+		scrollback: session.NewScrollback(0),
 	}
-}
-
-func (m *terminalModel) StartShell(width, height int) tea.Cmd {
-	m.width = width
-	m.height = height
-
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/bash"
-	}
-
-	return m.startProcess(exec.Command(shell), width, height)
-}
-
-func (m *terminalModel) StartCommand(args []string, dir string, width, height int) tea.Cmd {
-	m.width = width
-	m.height = height
-
-	if len(args) == 0 {
-		return nil
-	}
-	cmd := exec.Command(args[0], args[1:]...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-
-	return m.startProcess(cmd, width, height)
-}
-
-func (m *terminalModel) startProcess(cmd *exec.Cmd, width, height int) tea.Cmd {
-	if width < 1 {
-		width = 80
-	}
-	if height < 1 {
-		height = 24
-	}
-
-	vt := vt10x.New(vt10x.WithSize(width, height))
-	m.vt = vt
-
-	cmd.Env = append(os.Environ(),
-		"TERM=xterm-256color",
-		"COLORTERM=truecolor",
-	)
-
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: uint16(height),
-		Cols: uint16(width),
-	})
-	if err != nil {
-		return func() tea.Msg { return ptyExitedMsg{err: err} }
-	}
-
-	m.ptmx = ptmx
-	m.cmd = cmd
-	m.active = true
-
-	return m.readLoop()
-}
-
-func (m *terminalModel) readLoop() tea.Cmd {
-	return func() tea.Msg {
-		buf := make([]byte, 4096)
-		n, err := m.ptmx.Read(buf)
-		if err != nil {
-			return ptyExitedMsg{err: err}
-		}
-		data := make([]byte, n)
-		copy(data, buf[:n])
-		return ptyOutputMsg(data)
-	}
-}
-
-// Update handles terminal-level messages. In the OpenConductor app flow,
-// this method is NOT called — the App handles session I/O at a higher level
-// (sessionOutputMsg + timer-based runScrollCheck). This Update path exists
-// for standalone terminalModel use (StartShell/StartCommand) and is
-// exercised by scrollback_test.go.
-func (m terminalModel) Update(msg tea.Msg) (terminalModel, tea.Cmd) {
-	switch msg := msg.(type) {
-	case ptyOutputMsg:
-		if !m.active {
-			return m, nil
-		}
-		m.mu.Lock()
-		m.captureAndWrite(msg)
-		m.mu.Unlock()
-		return m, m.readLoop()
-
-	case ptyExitedMsg:
-		m.active = false
-		return m, nil
-
-	case tea.KeyMsg:
-		if !m.active || !m.focused {
-			return m, nil
-		}
-		data := keyToBytes(msg)
-		if data != nil && m.ptmx != nil {
-			m.ptmx.Write(data)
-		}
-		return m, nil
-	}
-
-	return m, nil
 }
 
 func (m terminalModel) View() string {
@@ -311,7 +196,8 @@ func (m terminalModel) viewScrollbackMixed() string {
 		offset = sbLen
 	}
 
-	fromScrollback := offset
+	// Always one screen: scrollback rows from offset back, then live rows.
+	fromScrollback := min(offset, m.height)
 	fromViewport := m.height - fromScrollback
 
 	var sb strings.Builder
@@ -351,9 +237,11 @@ func (m terminalModel) renderViewportRow(sb *strings.Builder, row int, cursorCol
 	var curFG vt10x.Color = vt10x.DefaultFG
 	var curBG vt10x.Color = vt10x.DefaultBG
 	var curMode int16
+	hasSel := m.selectionActive()
 
 	for col := 0; col < m.width; col++ {
 		g := m.vt.Cell(col, row)
+		selected := hasSel && m.IsSelected(col, row)
 		ch := g.Char
 		if ch == 0 {
 			ch = ' '
@@ -366,12 +254,12 @@ func (m terminalModel) renderViewportRow(sb *strings.Builder, row int, cursorCol
 		}
 
 		// Highlight selected cells with reverse video.
-		if m.IsSelected(col, row) {
+		if selected {
 			g.Mode ^= int16(vtAttrReverse)
 		}
 
 		if g.FG != curFG || g.BG != curBG || g.Mode != curMode {
-			sb.WriteString(glyphSGR(g))
+			writeGlyphSGR(sb, g)
 			curFG = g.FG
 			curBG = g.BG
 			curMode = g.Mode
@@ -380,7 +268,7 @@ func (m terminalModel) renderViewportRow(sb *strings.Builder, row int, cursorCol
 
 		// After drawing the cursor or selection cell, force a fresh SGR
 		// on the next cell so the reverse doesn't bleed.
-		if col == cursorCol || m.IsSelected(col, row) {
+		if col == cursorCol || selected {
 			curFG = vt10x.Color(0xFFFFFFFF)
 			curBG = vt10x.Color(0xFFFFFFFF)
 			curMode = -1
@@ -406,20 +294,22 @@ func (m terminalModel) renderGlyphRow(sb *strings.Builder, glyphs []vt10x.Glyph,
 		renderWidth = m.width
 	}
 
+	hasSel := m.selectionActive()
 	for col := 0; col < renderWidth; col++ {
 		g := glyphs[col]
+		selected := hasSel && m.IsSelected(col, displayRow)
 		ch := g.Char
 		if ch == 0 {
 			ch = ' '
 		}
 
 		// Highlight selected cells with reverse video.
-		if m.IsSelected(col, displayRow) {
+		if selected {
 			g.Mode ^= int16(vtAttrReverse)
 		}
 
 		if g.FG != curFG || g.BG != curBG || g.Mode != curMode {
-			sb.WriteString(glyphSGR(g))
+			writeGlyphSGR(sb, g)
 			curFG = g.FG
 			curBG = g.BG
 			curMode = g.Mode
@@ -427,7 +317,7 @@ func (m terminalModel) renderGlyphRow(sb *strings.Builder, glyphs []vt10x.Glyph,
 		sb.WriteRune(ch)
 
 		// Force fresh SGR after selection cell so reverse doesn't bleed.
-		if m.IsSelected(col, displayRow) {
+		if selected {
 			curFG = vt10x.Color(0xFFFFFFFF)
 			curBG = vt10x.Color(0xFFFFFFFF)
 			curMode = -1
@@ -682,7 +572,7 @@ func (m terminalModel) plainTextScrollbackOnly() string {
 		lineIdx := startIdx + i
 		if lineIdx >= 0 && lineIdx < sbLen {
 			if glyphs := m.scrollback.Line(lineIdx); glyphs != nil {
-				lines = append(lines, glyphsToText(glyphs))
+				lines = append(lines, session.GlyphsText(glyphs))
 				continue
 			}
 		}
@@ -702,14 +592,15 @@ func (m terminalModel) plainTextScrollbackMixed() string {
 	if offset > sbLen {
 		offset = sbLen
 	}
-	fromScrollback := offset
+	// Always one screen: scrollback rows from offset back, then live rows.
+	fromScrollback := min(offset, m.height)
 	fromViewport := m.height - fromScrollback
 	lines := make([]string, 0, m.height)
 
 	for i := 0; i < fromScrollback; i++ {
 		lineIdx := sbLen - offset + i
 		if glyphs := m.scrollback.Line(lineIdx); glyphs != nil {
-			lines = append(lines, glyphsToText(glyphs))
+			lines = append(lines, session.GlyphsText(glyphs))
 		} else {
 			lines = append(lines, "")
 		}
@@ -732,10 +623,9 @@ func (m terminalModel) plainTextScrollbackMixed() string {
 	return strings.Join(lines, "\n")
 }
 
-// glyphSGR returns an SGR escape sequence that sets the terminal attributes
+// writeGlyphSGR writes an SGR escape sequence that sets the terminal attributes
 // to match the given vt10x glyph's foreground, background, and mode.
-func glyphSGR(g vt10x.Glyph) string {
-	var sb strings.Builder
+func writeGlyphSGR(sb *strings.Builder, g vt10x.Glyph) {
 	sb.WriteString("\x1b[0") // reset as base
 
 	if g.Mode&vtAttrBold != 0 {
@@ -764,7 +654,6 @@ func glyphSGR(g vt10x.Glyph) string {
 	}
 
 	sb.WriteByte('m')
-	return sb.String()
 }
 
 // colorSGR converts a vt10x Color to an SGR parameter string.
@@ -811,85 +700,6 @@ func colorSGR(c vt10x.Color, fg bool) string {
 		return "38;2;" + strconv.Itoa(int(r)) + ";" + strconv.Itoa(int(g)) + ";" + strconv.Itoa(int(b))
 	}
 	return "48;2;" + strconv.Itoa(int(r)) + ";" + strconv.Itoa(int(g)) + ";" + strconv.Itoa(int(b))
-}
-
-// ── Scrollback capture ──────────────────────────────────────────
-
-// captureAndWrite snapshots the current viewport, writes data to vt10x,
-// then detects how many lines scrolled off and pushes them to the
-// scrollback buffer. Must be called with mu held.
-func (m *terminalModel) captureAndWrite(data []byte) {
-	if m.vt == nil {
-		return
-	}
-
-	// Snapshot all rows as glyph slices + text before the write.
-	oldGlyphs := m.snapshotGlyphs()
-	oldTexts := make([]string, len(oldGlyphs))
-	for i, row := range oldGlyphs {
-		oldTexts[i] = glyphsToText(row)
-	}
-
-	// Write to vt10x — this may destroy the top rows via scrollUp().
-	m.vt.Write(data)
-
-	// Build new text snapshot for shift detection.
-	newTexts := make([]string, m.height)
-	for row := 0; row < m.height; row++ {
-		newTexts[row] = m.viewportRowText(row)
-	}
-
-	// Detect how many lines scrolled off the top.
-	shift := detectScrollShift(oldTexts, newTexts)
-
-	if shift > 0 {
-		// Find where the shifted region starts. In a normal terminal scroll,
-		// this is row 0. In a TUI with a fixed header, the top rows may be
-		// identical (header), and the actual shift starts further down.
-		firstDiff := 0
-		for firstDiff < len(oldTexts) && firstDiff < len(newTexts) && oldTexts[firstDiff] == newTexts[firstDiff] {
-			firstDiff++
-		}
-
-		// Push the scrolled-off rows from old[firstDiff..firstDiff+shift-1].
-		end := firstDiff + shift
-		if end > len(oldGlyphs) {
-			end = len(oldGlyphs)
-		}
-		for i := firstDiff; i < end; i++ {
-			m.scrollback.Push(oldGlyphs[i])
-		}
-	}
-}
-
-// snapshotGlyphs copies every cell from the current vt10x viewport into
-// freshly allocated glyph slices. Must be called with mu held.
-func (m *terminalModel) snapshotGlyphs() []scrollbackLine {
-	rows := make([]scrollbackLine, m.height)
-	for row := 0; row < m.height; row++ {
-		glyphs := make(scrollbackLine, m.width)
-		for col := 0; col < m.width; col++ {
-			glyphs[col] = m.vt.Cell(col, row)
-		}
-		rows[row] = glyphs
-	}
-	return rows
-}
-
-// viewportRowText returns the text content of a single viewport row,
-// trimmed of trailing spaces. Must be called with mu held.
-func (m *terminalModel) viewportRowText(row int) string {
-	var sb strings.Builder
-	sb.Grow(m.width)
-	for col := 0; col < m.width; col++ {
-		g := m.vt.Cell(col, row)
-		if g.Char == 0 {
-			sb.WriteRune(' ')
-		} else {
-			sb.WriteRune(g.Char)
-		}
-	}
-	return strings.TrimRight(sb.String(), " ")
 }
 
 // ── Scroll navigation ───────────────────────────────────────────
@@ -940,12 +750,6 @@ func (m *terminalModel) SetSize(width, height int) {
 	}
 	m.width = width
 	m.height = height
-	if m.active && m.ptmx != nil {
-		pty.Setsize(m.ptmx, &pty.Winsize{
-			Rows: uint16(height),
-			Cols: uint16(width),
-		})
-	}
 	m.mu.Lock()
 	if m.vt != nil {
 		m.vt.Resize(width, height)
@@ -963,27 +767,9 @@ func (m *terminalModel) GetScreenLines() []string {
 
 	lines := make([]string, m.height)
 	for row := 0; row < m.height; row++ {
-		var sb strings.Builder
-		for col := 0; col < m.width; col++ {
-			g := m.vt.Cell(col, row)
-			if g.Char == 0 {
-				sb.WriteRune(' ')
-			} else {
-				sb.WriteRune(g.Char)
-			}
-		}
-		lines[row] = strings.TrimRight(sb.String(), " ")
+		lines[row] = session.RowText(m.vt, row, m.width)
 	}
 	return lines
-}
-
-func (m *terminalModel) Close() {
-	if m.ptmx != nil {
-		m.ptmx.Close()
-	}
-	if m.cmd != nil && m.cmd.Process != nil {
-		m.cmd.Process.Signal(os.Interrupt)
-	}
 }
 
 func keyToBytes(msg tea.KeyMsg) []byte {
