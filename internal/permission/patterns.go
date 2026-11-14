@@ -95,7 +95,23 @@ var claudeCodePatterns = []patternRule{
 //   "HTTP request ..."               → Network
 //   "mcp_<tool> ..."                 → MCPTools
 
+// OpenCode 1.18 (captured from real dialogs) uses a different layout:
+//
+//   △ Permission required
+//     # Shell command          → BashAny, command on the "$ ..." line below
+//     → Edit main.go           → FileEdit (also used for new files)
+//     % WebFetch https://...   → Network
+//     ✱ Glob "*.txt"           → FileRead
+//   Allow once   Allow always   Reject
+
 var openCodePatterns = []patternRule{
+	// OpenCode 1.18 dialog headings.
+	{regexp.MustCompile(`#\s*Shell command\b`), BashAny},
+	{regexp.MustCompile(`→\s*Edit\s`), FileEdit},
+	{regexp.MustCompile(`→\s*(Write|Create)\s`), FileCreate},
+	{regexp.MustCompile(`→\s*Read\s`), FileRead},
+	{regexp.MustCompile(`%\s*WebFetch\s`), Network},
+	{regexp.MustCompile(`✱\s*Glob\s`), FileRead},
 	// Action description lines — the "←" arrow prefix is the key signal.
 	// U+2190 "←" is matched as a literal rune; the (?i) flag covers the verb.
 	{regexp.MustCompile(`←\s*(?i)(read|view)\s`), FileRead},
@@ -134,6 +150,15 @@ var genericPatterns = []patternRule{
 // the category.
 func TryMatch(agentType config.AgentType, lines []string) *ParsedPermission {
 	rules := rulesFor(agentType)
+	if agentType == config.AgentOpenCode {
+		// Only the dialog counts: everything below its title.
+		for i := len(lines) - 1; i >= 0; i-- {
+			if strings.Contains(lines[i], "Permission required") {
+				lines = lines[i:]
+				break
+			}
+		}
+	}
 
 	for i := len(lines) - 1; i >= 0; i-- {
 		for _, rule := range rules {
@@ -172,6 +197,8 @@ func rulesFor(agentType config.AgentType) []patternRule {
 // bashCmdPatterns are tried in order: most specific wins.
 // Each captures the first meaningful token after the keyword.
 var bashCmdPatterns = []*regexp.Regexp{
+	// OpenCode 1.18: the command on its own "$ git status" line.
+	regexp.MustCompile(`(?m)^[\s┃│]*\$\s+(\w+)`),
 	// OpenCode: "← Execute command npm install" / "← Run command git status"
 	regexp.MustCompile(`(?i)(?:execute|run)\s+command\s+(\w+)`),
 	// Claude Code: "Allow running bash command: git status"

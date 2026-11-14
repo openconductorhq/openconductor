@@ -428,3 +428,45 @@ func TestTryMatch_SafeLevelBypasses(t *testing.T) {
 		})
 	}
 }
+
+// OpenCode 1.18 dialogs as captured by scripts/e2e.sh (panel text, trailing
+// spaces trimmed). The transcript above the dialog repeats the command.
+func openCode118Dialog(heading string, body ...string) []string {
+	lines := []string{
+		"  ┃  CMD: earlier request",
+		"     $ rm -rf /",
+		"     ▣  Build · Mock",
+		"  ┃",
+		"  ┃  △ Permission required",
+		"  ┃    " + heading,
+		"  ┃",
+	}
+	for _, b := range body {
+		lines = append(lines, "  ┃  "+b)
+	}
+	return append(lines, "  ┃", "  ┃   Allow once   Allow always   Reject          ctrl+f fullscreen  ⇆ select  enter confirm")
+}
+
+func TestTryMatch_OpenCode118(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []string
+		want  Category
+	}{
+		{"safe shell command", openCode118Dialog("# Shell command", "$ go version"), BashSafe},
+		{"chained shell command", openCode118Dialog("# Shell command", "$ git status && rm -rf build"), BashAny},
+		{"unsafe shell command", openCode118Dialog("# Shell command", "$ rm -rf build"), BashAny},
+		{"edit", openCode118Dialog("→ Edit a.txt", "1 - hello      1 + bye"), FileEdit},
+		{"new file", openCode118Dialog("→ Edit new.txt", "               1 + hi"), FileEdit},
+		{"web fetch", openCode118Dialog("% WebFetch https://example.com", "URL: https://example.com"), Network},
+		{"glob", openCode118Dialog(`✱ Glob "*.txt"`, "Pattern: *.txt"), FileRead},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := TryMatch(config.AgentOpenCode, tt.lines)
+			if p == nil || p.Category != tt.want {
+				t.Fatalf("got %+v, want %s", p, tt.want)
+			}
+		})
+	}
+}
