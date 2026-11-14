@@ -3,7 +3,10 @@
 
 package agent
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // ── ParseQuestionOptions ────────────────────────────────────────
 
@@ -204,5 +207,38 @@ func TestParseQuestionOptions_FooterInSecondToLastRow(t *testing.T) {
 	opts := ParseQuestionOptions(screen)
 	if len(opts) != 2 {
 		t.Fatalf("expected 2 options, got %d: %v", len(opts), opts)
+	}
+}
+
+func TestParseQuestionOptions_DescriptionsAndMultiDigit(t *testing.T) {
+	footer := "Enter to select · ↑/↓ to navigate · Esc to cancel"
+	tests := []struct {
+		name  string
+		lines []string
+		want  int
+	}{
+		{"space-indented descriptions", []string{
+			"Which framework?",
+			"❯ 1. React",
+			"     Component library",
+			"  2. Vue",
+			"     Progressive",
+			"  3. Type something.",
+			footer,
+		}, 3},
+		{"ten or more options", func() []string {
+			l := []string{"Pick one:"}
+			for i := 1; i <= 12; i++ {
+				l = append(l, fmt.Sprintf("  %d. option %d", i, i))
+			}
+			return append(l, footer)
+		}(), 12},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ParseQuestionOptions(tt.lines); len(got) != tt.want {
+				t.Errorf("got %d options %q, want %d", len(got), got, tt.want)
+			}
+		})
 	}
 }

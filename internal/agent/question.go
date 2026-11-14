@@ -53,13 +53,14 @@ func ParseQuestionOptions(lines []string) []string {
 		if stripped == "" {
 			continue
 		}
-		// Check if this is a numbered option.
-		if len(stripped) >= 2 && stripped[0] >= '1' && stripped[0] <= '9' && (stripped[1] == '.' || stripped[1] == ')') {
+		if isNumberedOption(stripped) {
 			options = append(options, stripped)
 			continue
 		}
-		// Indented text (description line for a previous option) — skip but keep scanning.
-		if strings.HasPrefix(trimmed, " ") || strings.HasPrefix(trimmed, "│") || strings.HasPrefix(trimmed, "┃") || strings.HasPrefix(trimmed, "›") {
+		// Description line for an option: indented deeper than the option
+		// prefix ("❯ 1." / "  2."), or inside an OpenCode dialog border.
+		indent := len(lines[i]) - len(strings.TrimLeft(lines[i], " "))
+		if indent > 2 || strings.HasPrefix(trimmed, "│") || strings.HasPrefix(trimmed, "┃") || strings.HasPrefix(trimmed, "›") {
 			continue
 		}
 		// Non-option, non-indented line — we've left the dialog. Stop.
@@ -71,4 +72,14 @@ func ParseQuestionOptions(lines []string) []string {
 		options[i], options[j] = options[j], options[i]
 	}
 	return options
+}
+
+// isNumberedOption reports whether s starts with "N." or "N)" (any number
+// of digits, first digit non-zero).
+func isNumberedOption(s string) bool {
+	n := 0
+	for n < len(s) && s[n] >= '0' && s[n] <= '9' {
+		n++
+	}
+	return n > 0 && s[0] != '0' && n < len(s) && (s[n] == '.' || s[n] == ')')
 }
