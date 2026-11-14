@@ -172,7 +172,7 @@ func newLLMClient(cfg *config.Config) llm.Client {
 	case "anthropic":
 		return llm.NewAnthropicClient(apiKey, model)
 	case "openai":
-		return llm.NewOpenAIClient(apiKey, model)
+		return llm.NewOpenAIClient(apiKey, model, cfg.LLM.BaseURL)
 	case "google":
 		client, err := llm.NewGoogleClient(context.Background(), apiKey, model)
 		if err != nil {

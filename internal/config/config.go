@@ -87,6 +87,9 @@ type LLMConfig struct {
 	Provider string `yaml:"provider"` // "anthropic", "openai", "google"
 	Model    string `yaml:"model"`
 	APIKey   string `yaml:"api_key_env"` // env var name containing the key
+	// BaseURL overrides the API endpoint (openai only), e.g. a proxy or a
+	// local OpenAI-compatible server.
+	BaseURL string `yaml:"base_url,omitempty"`
 }
 
 type NotificationConfig struct {

@@ -80,6 +80,7 @@ func (d *Detector) classifyUncertain(ctx context.Context, projectName string, la
 	result, err := d.classifier.Classify(ctx, projectName, lastLines)
 	if err != nil {
 		// On LLM error, treat as no event (fail open).
+		logging.Warn("attention: L2 classify failed", "project", projectName, "error", err)
 		return nil
 	}
 

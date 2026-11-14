@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/openconductorhq/openconductor/internal/config"
+	"github.com/openconductorhq/openconductor/internal/logging"
 )
 
 // Detector combines L1 pattern matching and an optional L2 LLM classifier to
@@ -41,7 +42,11 @@ func (d *Detector) Detect(ctx context.Context, sessionName string, agentType con
 	}
 
 	p, err := d.classifier.Classify(ctx, sessionName, agentType, lines)
-	if err != nil || p == nil {
+	if err != nil {
+		logging.Warn("permission: L2 classify failed", "session", sessionName, "error", err)
+		return nil
+	}
+	if p == nil {
 		return nil
 	}
 
